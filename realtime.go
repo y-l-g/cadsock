@@ -79,6 +79,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 //export_php:namespace Realtime
+
 //export_php:function start(): void
 func start() {
 	getHubAndStartServer()
