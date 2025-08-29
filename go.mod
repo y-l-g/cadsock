@@ -3,4 +3,3 @@ module github.com/y-l-g/realtime_extension
 go 1.25.0
 
 require github.com/gorilla/websocket v1.5.3 // indirect
-replace github.com/y-l-g/realtime_extension => ./
