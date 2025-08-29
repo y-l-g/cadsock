@@ -30,7 +30,6 @@ func getHubAndStartServer() {
 			unregister: make(chan *websocket.Conn),
 		}
 		go hub.run()
-
 		http.HandleFunc("/ws", handleConnections)
 		log.Println("Serveur WebSocket démarré une seule fois sur :8081")
 		go func() {
@@ -68,11 +67,8 @@ func (h *Hub) run() {
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
+	if err != nil { return }
 	defer ws.Close()
-
 	hub.register <- ws
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
@@ -83,12 +79,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 //export_php:namespace Realtime
-
 //export_php:function start(): void
 func start() {
 	getHubAndStartServer()
 }
-
 //export_php:function broadcast(string $message): void
 func broadcast(message *C.zend_string) {
 	getHubAndStartServer()
