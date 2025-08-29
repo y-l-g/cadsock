@@ -1,21 +1,11 @@
-package realtime
+package main
 
-/*
-#include <stdlib.h>
-#include "realtime.h"
-*/
-import "C"
-import "github.com/dunglas/frankenphp"
-import "github.com/gorilla/websocket"
-import "log"
-import "net/http"
-import "sync"
-import "unsafe"
-
-func init() {
-	frankenphp.RegisterExtension(unsafe.Pointer(&C.realtime_module_entry))
-}
-
+import (
+	"github.com/gorilla/websocket"
+	"log"
+	"net/http"
+	"sync"
+)
 
 var (
 	upgrader = websocket.Upgrader{
@@ -25,6 +15,13 @@ var (
 	once sync.Once
 )
 
+type Hub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan []byte
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	lock       sync.RWMutex
+}
 
 func getHub() *Hub {
 	once.Do(func() {
@@ -38,6 +35,7 @@ func getHub() *Hub {
 	})
 	return hub
 }
+
 func (h *Hub) run() {
 	for {
 		select {
@@ -66,6 +64,7 @@ func (h *Hub) run() {
 		}
 	}
 }
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -81,6 +80,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
 func startServer() {
 	http.HandleFunc("/ws", handleConnections)
 	log.Println("Serveur WebSocket démarré sur :8081")
@@ -90,17 +90,3 @@ func startServer() {
 		}
 	}()
 }
-//export start
-func start() bool {
-	getHub()
-	startServer()
-	return true
-}
-
-//export broadcast
-func broadcast(message *C.zend_string) {
-	goMessage := frankenphp.GoString(unsafe.Pointer(message))
-	hub := getHub()
-	hub.broadcast <- []byte(goMessage)
-}
-
