@@ -1,4 +1,4 @@
-# extension Extension
+# realtime Extension
 
 Auto-generated PHP extension from Go code.
 
@@ -7,10 +7,10 @@ Auto-generated PHP extension from Go code.
 ### start
 
 ```php
-start(): bool
+start(): void
 ```
 
-**Returns:** bool
+**Returns:** void
 
 ### broadcast
 

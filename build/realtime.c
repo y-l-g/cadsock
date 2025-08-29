@@ -4,20 +4,20 @@
 #include <Zend/zend_types.h>
 #include <stddef.h>
 
-#include "extension.h"
-#include "extension_arginfo.h"
+#include "realtime.h"
+#include "realtime_arginfo.h"
 #include "_cgo_export.h"
 
 
-PHP_MINIT_FUNCTION(extension) {
+PHP_MINIT_FUNCTION(realtime) {
     
     return SUCCESS;
 }
 
-zend_module_entry extension_module_entry = {STANDARD_MODULE_HEADER,
-                                         "extension",
+zend_module_entry realtime_module_entry = {STANDARD_MODULE_HEADER,
+                                         "realtime",
                                          ext_functions,             /* Functions */
-                                         PHP_MINIT(extension),  /* MINIT */
+                                         PHP_MINIT(realtime),  /* MINIT */
                                          NULL,                      /* MSHUTDOWN */
                                          NULL,                      /* RINIT */
                                          NULL,                      /* RSHUTDOWN */
@@ -30,8 +30,7 @@ PHP_FUNCTION(Realtime_start)
     if (zend_parse_parameters_none() == FAILURE) {
         RETURN_THROWS();
     }
-    int result = start();
-    RETURN_BOOL(result);
+    start();
 }
 
 PHP_FUNCTION(Realtime_broadcast)

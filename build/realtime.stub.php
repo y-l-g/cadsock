@@ -4,7 +4,7 @@
 
 namespace Realtime;
 
-function start(): bool {}
+function start(): void {}
 
 function broadcast(string $message): void {}
 

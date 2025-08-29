@@ -1,18 +1,13 @@
 package main
 
 import (
+	"C"
+	"github.com/dunglas/frankenphp"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"sync"
-)
-
-var (
-	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-	hub  *Hub
-	once sync.Once
+	"unsafe"
 )
 
 type Hub struct {
@@ -23,7 +18,10 @@ type Hub struct {
 	lock       sync.RWMutex
 }
 
-func getHub() *Hub {
+var hub *Hub
+var once sync.Once
+
+func getHubAndStartServer() {
 	once.Do(func() {
 		hub = &Hub{
 			clients:    make(map[*websocket.Conn]bool),
@@ -32,8 +30,15 @@ func getHub() *Hub {
 			unregister: make(chan *websocket.Conn),
 		}
 		go hub.run()
+
+		http.HandleFunc("/ws", handleConnections)
+		log.Println("Serveur WebSocket démarré une seule fois sur :8081")
+		go func() {
+			if err := http.ListenAndServe(":8081", nil); err != nil {
+				log.Printf("Erreur du serveur WebSocket: %v", err)
+			}
+		}()
 	})
-	return hub
 }
 
 func (h *Hub) run() {
@@ -43,22 +48,17 @@ func (h *Hub) run() {
 			h.lock.Lock()
 			h.clients[client] = true
 			h.lock.Unlock()
-			log.Println("Client connecté")
 		case client := <-h.unregister:
 			h.lock.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				client.Close()
-				log.Println("Client déconnecté")
 			}
 			h.lock.Unlock()
 		case message := <-h.broadcast:
 			h.lock.RLock()
 			for client := range h.clients {
-				if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
-					log.Printf("Erreur d'écriture: %v", err)
-					h.unregister <- client
-				}
+				client.WriteMessage(websocket.TextMessage, message)
 			}
 			h.lock.RUnlock()
 		}
@@ -66,12 +66,13 @@ func (h *Hub) run() {
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Fatal(err)
+		return
 	}
 	defer ws.Close()
-	hub := getHub()
+
 	hub.register <- ws
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
@@ -81,12 +82,18 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func startServer() {
-	http.HandleFunc("/ws", handleConnections)
-	log.Println("Serveur WebSocket démarré sur :8081")
-	go func() {
-		if err := http.ListenAndServe(":8081", nil); err != nil {
-			log.Printf("Erreur du serveur WebSocket: %v", err)
-		}
-	}()
+//export_php:namespace Realtime
+
+//export_php:function start(): void
+func start() {
+	getHubAndStartServer()
+}
+
+//export_php:function broadcast(string $message): void
+func broadcast(message *C.zend_string) {
+	getHubAndStartServer()
+	goMessage := frankenphp.GoString(unsafe.Pointer(message))
+	if hub != nil {
+		hub.broadcast <- []byte(goMessage)
+	}
 }
