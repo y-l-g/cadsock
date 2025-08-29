@@ -3,16 +3,20 @@ package main
 import (
 	"C"
 	"github.com/dunglas/frankenphp"
-	"github.comcom/gorilla/websocket"
+	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"sync"
 	"unsafe"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+var (
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	hub  *Hub
+	once sync.Once
+)
 
 type Hub struct {
 	clients    map[*websocket.Conn]bool
@@ -21,9 +25,6 @@ type Hub struct {
 	unregister chan *websocket.Conn
 	lock       sync.RWMutex
 }
-
-var hub *Hub
-var once sync.Once
 
 func getHub() *Hub {
 	once.Do(func() {
@@ -73,10 +74,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	}
 	defer ws.Close()
-
 	hub := getHub()
 	hub.register <- ws
-
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
 			hub.unregister <- ws

@@ -6,7 +6,7 @@ package realtime
 */
 import "C"
 import "github.com/dunglas/frankenphp"
-import "github.comcom/gorilla/websocket"
+import "github.com/gorilla/websocket"
 import "log"
 import "net/http"
 import "sync"
@@ -17,9 +17,13 @@ func init() {
 }
 
 
-var upgrader = websocket.Upgrader{
-var hub *Hub
-var once sync.Once
+var (
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	hub  *Hub
+	once sync.Once
+)
 
 
 func getHub() *Hub {
@@ -68,10 +72,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	}
 	defer ws.Close()
-
 	hub := getHub()
 	hub.register <- ws
-
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
 			hub.unregister <- ws
