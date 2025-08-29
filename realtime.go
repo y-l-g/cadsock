@@ -3,7 +3,7 @@ package main
 import (
 	"C"
 	"github.com/dunglas/frankenphp"
-	"github.com/gorilla/websocket"
+	"github.comcom/gorilla/websocket"
 	"log"
 	"net/http"
 	"sync"

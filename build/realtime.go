@@ -6,7 +6,7 @@ package realtime
 */
 import "C"
 import "github.com/dunglas/frankenphp"
-import "github.com/gorilla/websocket"
+import "github.comcom/gorilla/websocket"
 import "log"
 import "net/http"
 import "sync"
