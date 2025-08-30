@@ -16,6 +16,14 @@ func init() {
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.realtime_module_entry))
 }
 
+type Hub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan []byte
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	lock       sync.RWMutex
+}
+
 
 var hub *Hub
 var once sync.Once
@@ -31,7 +39,7 @@ func getHubAndStartServer() {
 		}
 		go hub.run()
 		http.HandleFunc("/ws", handleConnections)
-		log.Println("Serveur WebSocket démarréeex une seule fois sur :8081")
+		log.Println("Serveur WebSocket démarréeex2 une seule fois sur :8081")
 		go func() {
 			if err := http.ListenAndServe(":8081", nil); err != nil {
 				log.Printf("Erreur du serveur WebSocket: %v", err)
