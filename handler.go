@@ -1,17 +1,13 @@
 package hub
 
 import (
-	"C"
 	"log"
 	"net/http"
 	"sync"
-	"unsafe"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.comcom/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
-
-	"github.com/dunglas/frankenphp"
 	"github.com/gorilla/websocket"
 )
 
@@ -19,7 +15,6 @@ func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
-
 
 type GoHandler struct{}
 
@@ -73,23 +68,6 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
-//export_php:function broadcast(string $message): void
-func broadcast(message *C.zend_string) {
-	msg := frankenphp.GoString(unsafe.Pointer(message))
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
-
-	for client := range clients {
-		err := client.WriteMessage(websocket.TextMessage, []byte(msg))
-		if err != nil {
-			client.Close()
-			delete(clients, client)
-		}
-	}
-}
-
-func main() {}
 
 var (
 	_ caddy.Module                = (*GoHandler)(nil)

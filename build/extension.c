@@ -4,20 +4,20 @@
 #include <Zend/zend_types.h>
 #include <stddef.h>
 
-#include "hub.h"
-#include "hub_arginfo.h"
+#include "extension.h"
+#include "extension_arginfo.h"
 #include "_cgo_export.h"
 
 
-PHP_MINIT_FUNCTION(hub) {
+PHP_MINIT_FUNCTION(extension) {
     
     return SUCCESS;
 }
 
-zend_module_entry hub_module_entry = {STANDARD_MODULE_HEADER,
-                                         "hub",
+zend_module_entry extension_module_entry = {STANDARD_MODULE_HEADER,
+                                         "extension",
                                          ext_functions,             /* Functions */
-                                         PHP_MINIT(hub),  /* MINIT */
+                                         PHP_MINIT(extension),  /* MINIT */
                                          NULL,                      /* MSHUTDOWN */
                                          NULL,                      /* RINIT */
                                          NULL,                      /* RSHUTDOWN */

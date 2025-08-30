@@ -1,4 +1,4 @@
-# hub Extension
+# extension Extension
 
 Auto-generated PHP extension from Go code.
 
