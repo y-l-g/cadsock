@@ -1,13 +1,12 @@
 {
 	frankenphp
+	order go_handler before file_server
 }
 
-:8080 {
-    route {
-	    handle /ws {
-		    go_handler HandleWebSocket
-	    }
-	php_server
-    }
+:8080
+
+handle /ws {
+	go_handler
 }
 
+php_server

@@ -8,7 +8,7 @@
     <h1>Messages reçus :</h1>
     <ul id="messages"></ul>
     <script>
-        let socket = new WebSocket("ws://localhost/ws");
+        let socket = new WebSocket("ws://localhost:8080/ws");
         socket.onmessage = function(event) {
             let messages = document.getElementById("messages");
             let message = document.createElement("li");
