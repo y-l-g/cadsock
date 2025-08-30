@@ -9,9 +9,6 @@ import "log"
 import "net/http"
 import "sync"
 import "unsafe"
-import "github.com/caddyserver/caddy/v2"
-import "github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-import "github.com/caddyserver/caddy/v2/modules/caddyhttp"
 import "github.com/dunglas/frankenphp"
 import "github.com/gorilla/websocket"
 
@@ -37,17 +34,18 @@ var (
 
 func init() {
 	caddy.RegisterModule(GoHandler{})
-	caddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
+	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
 
 type GoHandler struct{}
+
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.go_handler",
 		New: func() caddy.Module { return new(GoHandler) },
 	}
 }
-func parseGoHandler(h caddyhttp.Helper) (caddyhttp.MiddlewareHandler, error) {
+func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	return new(GoHandler), nil
 }
 func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
