@@ -7,3 +7,9 @@ php_server {
 		root www
 	}
 }
+
+:8081 {
+    route * {
+        franken_relay
+    }
+}
