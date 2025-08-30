@@ -18,6 +18,13 @@ func init() {
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.realtime_module_entry))
 }
 
+type Hub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan []byte
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	lock       sync.RWMutex
+}
 
 var hub *Hub
 var once sync.Once
@@ -63,6 +70,8 @@ func (h *Hub) run() {
 		}
 	}
 }
+
+type FrankenRelay struct{}
 func (FrankenRelay) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.franken_relay",
