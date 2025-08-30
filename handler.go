@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.comcom/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
 )
