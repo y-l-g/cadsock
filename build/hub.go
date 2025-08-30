@@ -9,7 +9,7 @@ import "log"
 import "net/http"
 import "sync"
 import "unsafe"
-import "github.comcom/dunglas/frankenphp"
+import "github.com/dunglas/frankenphp"
 import "github.com/gorilla/websocket"
 
 func init() {

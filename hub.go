@@ -7,7 +7,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.comcom/dunglas/frankenphp"
+	"github.com/dunglas/frankenphp"
 	"github.com/gorilla/websocket"
 )
 
