@@ -37,6 +37,8 @@ var (
 func init() {
 	caddy.RegisterModule(GoHandler{})
 }
+
+type GoHandler struct{}
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.go_handler",
