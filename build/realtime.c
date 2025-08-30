@@ -25,14 +25,6 @@ zend_module_entry realtime_module_entry = {STANDARD_MODULE_HEADER,
                                          "1.0.0",                   /* Version */
                                          STANDARD_MODULE_PROPERTIES};
 
-PHP_FUNCTION(Realtime_start)
-{
-    if (zend_parse_parameters_none() == FAILURE) {
-        RETURN_THROWS();
-    }
-    start();
-}
-
 PHP_FUNCTION(Realtime_broadcast)
 {
     zend_string *message = NULL;
