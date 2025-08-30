@@ -1,4 +1,4 @@
-# realtime Extension
+# hub Extension
 
 Auto-generated PHP extension from Go code.
 
