@@ -1,4 +1,4 @@
-module github.com/y-l-g/realtime_extension
+module github.com/y-l-g/realtime/handler
 
 go 1.25.0
 

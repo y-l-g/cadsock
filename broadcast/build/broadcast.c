@@ -4,20 +4,20 @@
 #include <Zend/zend_types.h>
 #include <stddef.h>
 
-#include "extension.h"
-#include "extension_arginfo.h"
+#include "broadcast.h"
+#include "broadcast_arginfo.h"
 #include "_cgo_export.h"
 
 
-PHP_MINIT_FUNCTION(extension) {
+PHP_MINIT_FUNCTION(broadcast) {
     
     return SUCCESS;
 }
 
-zend_module_entry extension_module_entry = {STANDARD_MODULE_HEADER,
-                                         "extension",
+zend_module_entry broadcast_module_entry = {STANDARD_MODULE_HEADER,
+                                         "broadcast",
                                          ext_functions,             /* Functions */
-                                         PHP_MINIT(extension),  /* MINIT */
+                                         PHP_MINIT(broadcast),  /* MINIT */
                                          NULL,                      /* MSHUTDOWN */
                                          NULL,                      /* RINIT */
                                          NULL,                      /* RSHUTDOWN */

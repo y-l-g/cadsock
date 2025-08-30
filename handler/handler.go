@@ -1,4 +1,4 @@
-package hub
+package handler
 
 import (
 	"log"
@@ -11,13 +11,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var (
+	Clients   = make(map[*websocket.Conn]bool)
+	ClientsMu sync.Mutex
+)
+
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
 
 type GoHandler struct{}
-
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.go_handler",

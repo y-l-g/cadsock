@@ -1,4 +1,4 @@
-# extension Extension
+# broadcast Extension
 
 Auto-generated PHP extension from Go code.
 
