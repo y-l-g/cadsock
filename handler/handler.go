@@ -16,6 +16,12 @@ var (
 	ClientsMu sync.Mutex
 )
 
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
@@ -38,16 +44,6 @@ func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	return nil
 }
 
-var (
-	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-	clients   = make(map[*websocket.Conn]bool)
-	clientsMu sync.Mutex
-)
-
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -56,14 +52,15 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	clientsMu.Lock()
-	clients[conn] = true
-	clientsMu.Unlock()
+	// ON UTILISE ClientsMu ET Clients (avec majuscule)
+	ClientsMu.Lock()
+	Clients[conn] = true
+	ClientsMu.Unlock()
 
 	defer func() {
-		clientsMu.Lock()
-		delete(clients, conn)
-		clientsMu.Unlock()
+		ClientsMu.Lock()
+		delete(Clients, conn)
+		ClientsMu.Unlock()
 	}()
 
 	for {
