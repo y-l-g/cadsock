@@ -5,8 +5,6 @@ package realtime
 #include "realtime.h"
 */
 import "C"
-import "github.com/caddyserver/caddy/v2"
-import "github.com/caddyserver/caddy/v2/modules/caddyhttp"
 import "github.com/dunglas/frankenphp"
 import "github.com/gorilla/websocket"
 import "log"
@@ -30,10 +28,7 @@ var hub *Hub
 var once sync.Once
 
 
-func init() {
-	caddy.RegisterModule(FrankenRelay{})
-}
-func getHub() *Hub {
+func getHubAndStartServer() {
 	once.Do(func() {
 		hub = &Hub{
 			clients:    make(map[*websocket.Conn]bool),
@@ -42,66 +37,45 @@ func getHub() *Hub {
 			unregister: make(chan *websocket.Conn),
 		}
 		go hub.run()
-		log.Println("Hub temps-réel démarré3 une seule fois.")
+
+		// On lance un serveur HTTP standard sur le port 8081
+		http.HandleFunc("/ws", handleConnections)
+		log.Println("--- SERVEUR WEBSOCKET SUR LE POINT DE DÉMARRER SUR :8081 ---")
+		go func() {
+			if err := http.ListenAndServe(":8081", nil); err != nil {
+				log.Printf("ERREUR SERVEUR WEBSOCKET: %v", err)
+			}
+		}()
 	})
-	return hub
 }
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.lock.Lock()
-			h.clients[client] = true
-			h.lock.Unlock()
-			log.Println("Client WebSocket connecté !")
+			h.lock.Lock(); h.clients[client] = true; h.lock.Unlock(); log.Println("--- CLIENT CONNECTÉ ---")
 		case client := <-h.unregister:
-			h.lock.Lock()
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				client.Close()
-			}
-			h.lock.Unlock()
+			h.lock.Lock(); if _, ok := h.clients[client]; ok { delete(h.clients, client); client.Close() }; h.lock.Unlock()
 		case message := <-h.broadcast:
-			h.lock.RLock()
-			for client := range h.clients {
-				client.WriteMessage(websocket.TextMessage, message)
-			}
-			h.lock.RUnlock()
+			h.lock.RLock(); for client := range h.clients { client.WriteMessage(websocket.TextMessage, message) }; h.lock.RUnlock()
 		}
 	}
 }
-
-type FrankenRelay struct{}
-func (FrankenRelay) CaddyModule() caddy.ModuleInfo {
-	return caddy.ModuleInfo{
-		ID:  "http.handlers.franken_relay",
-		New: func() caddy.Module { return new(FrankenRelay) },
-	}
-}
-func (m FrankenRelay) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+func handleConnections(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("ERREUR WEBSOCKET: %v", err)
-		return err
-	}
+	if err != nil { return }
 	defer ws.Close()
-	hub := getHub()
 	hub.register <- ws
 	for {
-		if _, _, err := ws.ReadMessage(); err != nil {
-			hub.unregister <- ws
-			break
-		}
+		if _, _, err := ws.ReadMessage(); err != nil { hub.unregister <- ws; break }
 	}
-	return nil
 }
-//export broadcast
+//export start
+func start() { getHubAndStartServer() }
+//export_php:function broadcast(string $message): void
 func broadcast(message *C.zend_string) {
-	hub := getHub()
+	getHubAndStartServer() // Assure que le hub est démarré
 	goMessage := frankenphp.GoString(unsafe.Pointer(message))
-	if hub != nil {
-		hub.broadcast <- []byte(goMessage)
-	}
+	if hub != nil { hub.broadcast <- []byte(goMessage) }
 }
 

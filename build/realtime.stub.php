@@ -4,6 +4,6 @@
 
 namespace Realtime;
 
-function broadcast(string $message): void {}
+function start(): void {}
 
 
