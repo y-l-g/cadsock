@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dunglas/frankenphp"
 	"github.com/gorilla/websocket"
@@ -15,6 +16,7 @@ import (
 
 func init() {
 	caddy.RegisterModule(GoHandler{})
+	caddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
 
 type GoHandler struct{}
@@ -24,6 +26,10 @@ func (GoHandler) CaddyModule() caddy.ModuleInfo {
 		ID:  "http.handlers.go_handler",
 		New: func() caddy.Module { return new(GoHandler) },
 	}
+}
+
+func parseGoHandler(h caddyhttp.Helper) (caddyhttp.MiddlewareHandler, error) {
+	return new(GoHandler), nil
 }
 
 func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
