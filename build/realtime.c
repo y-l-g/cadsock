@@ -1,0 +1,35 @@
+#include <php.h>
+#include <Zend/zend_API.h>
+#include <Zend/zend_hash.h>
+#include <Zend/zend_types.h>
+#include <stddef.h>
+
+#include "realtime.h"
+#include "realtime_arginfo.h"
+#include "_cgo_export.h"
+
+
+PHP_MINIT_FUNCTION(realtime) {
+    
+    return SUCCESS;
+}
+
+zend_module_entry realtime_module_entry = {STANDARD_MODULE_HEADER,
+                                         "realtime",
+                                         ext_functions,             /* Functions */
+                                         PHP_MINIT(realtime),  /* MINIT */
+                                         NULL,                      /* MSHUTDOWN */
+                                         NULL,                      /* RINIT */
+                                         NULL,                      /* RSHUTDOWN */
+                                         NULL,                      /* MINFO */
+                                         "1.0.0",                   /* Version */
+                                         STANDARD_MODULE_PROPERTIES};
+
+PHP_FUNCTION(Realtime_start)
+{
+    if (zend_parse_parameters_none() == FAILURE) {
+        RETURN_THROWS();
+    }
+    start();
+}
+
