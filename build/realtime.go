@@ -71,6 +71,8 @@ func (h *Hub) run() {
 		}
 	}
 }
+
+type FrankenRelay struct{}
 func (FrankenRelay) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.franken_relay",
