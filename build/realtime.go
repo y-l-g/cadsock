@@ -16,13 +16,6 @@ func init() {
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.realtime_module_entry))
 }
 
-type Hub struct {
-	clients    map[*websocket.Conn]bool
-	broadcast  chan []byte
-	register   chan *websocket.Conn
-	unregister chan *websocket.Conn
-	lock       sync.RWMutex
-}
 
 var hub *Hub
 var once sync.Once
@@ -37,8 +30,6 @@ func getHubAndStartServer() {
 			unregister: make(chan *websocket.Conn),
 		}
 		go hub.run()
-
-		// On lance un serveur HTTP standard sur le port 8081
 		http.HandleFunc("/ws", handleConnections)
 		log.Println("--- SERVEUR WEBSOCKET SUR LE POINT DE DÉMARRER SUR :8081 ---")
 		go func() {
@@ -71,11 +62,16 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 //export start
-func start() { getHubAndStartServer() }
-//export_php:function broadcast(string $message): void
+func start() {
+    getHubAndStartServer()
+}
+
+//export broadcast
 func broadcast(message *C.zend_string) {
-	getHubAndStartServer() // Assure que le hub est démarré
-	goMessage := frankenphp.GoString(unsafe.Pointer(message))
-	if hub != nil { hub.broadcast <- []byte(goMessage) }
+    getHubAndStartServer()
+    goMessage := frankenphp.GoString(unsafe.Pointer(message))
+    if hub != nil {
+        hub.broadcast <- []byte(goMessage)
+    }
 }
 

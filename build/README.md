@@ -12,4 +12,16 @@ start(): void
 
 **Returns:** void
 
+### broadcast
+
+```php
+broadcast(string $message): void
+```
+
+**Parameters:**
+
+- `message` (string)
+
+**Returns:** void
+
 

@@ -28,8 +28,6 @@ func getHubAndStartServer() {
 			unregister: make(chan *websocket.Conn),
 		}
 		go hub.run()
-
-		// On lance un serveur HTTP standard sur le port 8081
 		http.HandleFunc("/ws", handleConnections)
 		log.Println("--- SERVEUR WEBSOCKET SUR LE POINT DE DÉMARRER SUR :8081 ---")
 		go func() {
@@ -65,10 +63,15 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 //export_php:namespace Realtime
 
 //export_php:function start(): void
-func start() { getHubAndStartServer() }
+func start() {
+    getHubAndStartServer()
+}
+
 //export_php:function broadcast(string $message): void
 func broadcast(message *C.zend_string) {
-	getHubAndStartServer() // Assure que le hub est démarré
-	goMessage := frankenphp.GoString(unsafe.Pointer(message))
-	if hub != nil { hub.broadcast <- []byte(goMessage) }
+    getHubAndStartServer()
+    goMessage := frankenphp.GoString(unsafe.Pointer(message))
+    if hub != nil {
+        hub.broadcast <- []byte(goMessage)
+    }
 }

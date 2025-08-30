@@ -1,3 +1,7 @@
+{
+    frankenphp 
+}
+
 :8080 {
 php_server {
 		root www

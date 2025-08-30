@@ -33,3 +33,12 @@ PHP_FUNCTION(Realtime_start)
     start();
 }
 
+PHP_FUNCTION(Realtime_broadcast)
+{
+    zend_string *message = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+    broadcast(message);
+}
+
