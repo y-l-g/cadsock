@@ -5,6 +5,8 @@ package realtime
 #include "realtime.h"
 */
 import "C"
+import "github.com/caddyserver/caddy/v2"
+import "github.com/caddyserver/caddy/v2/modules/caddyhttp"
 import "github.com/dunglas/frankenphp"
 import "github.com/gorilla/websocket"
 import "log"
@@ -29,7 +31,10 @@ var hub *Hub
 var once sync.Once
 
 
-func getHubAndStartServer() {
+func init() {
+	caddy.RegisterModule(FrankenRelay{})
+}
+func getHub() *Hub {
 	once.Do(func() {
 		hub = &Hub{
 			clients:    make(map[*websocket.Conn]bool),
@@ -38,14 +43,9 @@ func getHubAndStartServer() {
 			unregister: make(chan *websocket.Conn),
 		}
 		go hub.run()
-		http.HandleFunc("/ws", handleConnections)
-		log.Println("Serveur WebSocket démarréeex2 une seule fois sur :8081")
-		go func() {
-			if err := http.ListenAndServe(":8081", nil); err != nil {
-				log.Printf("Erreur du serveur WebSocket: %v", err)
-			}
-		}()
+		log.Println("Hub temps-réel démarré3 une seule fois.")
 	})
+	return hub
 }
 func (h *Hub) run() {
 	for {
@@ -54,7 +54,7 @@ func (h *Hub) run() {
 			h.lock.Lock()
 			h.clients[client] = true
 			h.lock.Unlock()
-			log.Println("Client connecté !")
+			log.Println("Client WebSocket connecté !")
 		case client := <-h.unregister:
 			h.lock.Lock()
 			if _, ok := h.clients[client]; ok {
@@ -71,16 +71,21 @@ func (h *Hub) run() {
 		}
 	}
 }
-func handleConnections(w http.ResponseWriter, r *http.Request) {
+func (FrankenRelay) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.handlers.franken_relay",
+		New: func() caddy.Module { return new(FrankenRelay) },
+	}
+}
+func (m FrankenRelay) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		// LA CORRECTION EST ICI : ON AFFICHE L'ERREUR !
-		log.Printf("ERREUR LORS DE L'UPGRADE WEBSOCKET: %v", err)
-		return
+		log.Printf("ERREUR WEBSOCKET: %v", err)
+		return err
 	}
 	defer ws.Close()
-
+	hub := getHub()
 	hub.register <- ws
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
@@ -88,13 +93,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	return nil
 }
-//export start
-func start() { getHubAndStartServer() }
-//export_php:function broadcast(string $message): void
+//export broadcast
 func broadcast(message *C.zend_string) {
-	getHubAndStartServer()
+	hub := getHub()
 	goMessage := frankenphp.GoString(unsafe.Pointer(message))
-	if hub != nil { hub.broadcast <- []byte(goMessage) }
+	if hub != nil {
+		hub.broadcast <- []byte(goMessage)
+	}
 }
 

@@ -25,11 +25,12 @@ zend_module_entry realtime_module_entry = {STANDARD_MODULE_HEADER,
                                          "1.0.0",                   /* Version */
                                          STANDARD_MODULE_PROPERTIES};
 
-PHP_FUNCTION(Realtime_start)
+PHP_FUNCTION(Realtime_broadcast)
 {
-    if (zend_parse_parameters_none() == FAILURE) {
-        RETURN_THROWS();
-    }
-    start();
+    zend_string *message = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+    broadcast(message);
 }
 

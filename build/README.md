@@ -4,11 +4,15 @@ Auto-generated PHP extension from Go code.
 
 ## Functions
 
-### start
+### broadcast
 
 ```php
-start(): void
+broadcast(string $message): void
 ```
+
+**Parameters:**
+
+- `message` (string)
 
 **Returns:** void
 
