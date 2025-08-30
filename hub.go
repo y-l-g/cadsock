@@ -1,4 +1,4 @@
-package main
+package hub
 
 import (
 	"C"
@@ -19,6 +19,7 @@ func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
+
 
 type GoHandler struct{}
 
