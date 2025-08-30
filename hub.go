@@ -7,9 +7,29 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dunglas/frankenphp"
 	"github.com/gorilla/websocket"
 )
+
+func init() {
+	caddy.RegisterModule(GoHandler{})
+}
+
+type GoHandler struct{}
+
+func (GoHandler) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.handlers.go_handler",
+		New: func() caddy.Module { return new(GoHandler) },
+	}
+}
+
+func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	HandleWebSocket(w, r)
+	return nil
+}
 
 var (
 	upgrader = websocket.Upgrader{
@@ -62,3 +82,8 @@ func broadcast(message *C.zend_string) {
 }
 
 func main() {}
+
+var (
+	_ caddy.Module                = (*GoHandler)(nil)
+	_ caddyhttp.MiddlewareHandler = (*GoHandler)(nil)
+)

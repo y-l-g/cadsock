@@ -9,6 +9,8 @@ import "log"
 import "net/http"
 import "sync"
 import "unsafe"
+import "github.com/caddyserver/caddy/v2"
+import "github.com/caddyserver/caddy/v2/modules/caddyhttp"
 import "github.com/dunglas/frankenphp"
 import "github.com/gorilla/websocket"
 
@@ -26,8 +28,25 @@ var (
 	clients   = make(map[*websocket.Conn]bool)
 	clientsMu sync.Mutex
 )
+var (
+	_ caddy.Module                = (*GoHandler)(nil)
+	_ caddyhttp.MiddlewareHandler = (*GoHandler)(nil)
+)
 
 
+func init() {
+	caddy.RegisterModule(GoHandler{})
+}
+func (GoHandler) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.handlers.go_handler",
+		New: func() caddy.Module { return new(GoHandler) },
+	}
+}
+func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	HandleWebSocket(w, r)
+	return nil
+}
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

@@ -1,0 +1,13 @@
+{
+	frankenphp
+}
+
+:8080 {
+    route {
+	    handle /ws {
+		    go_handler HandleWebSocket
+	    }
+	php_server
+    }
+}
+
