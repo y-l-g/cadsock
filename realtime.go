@@ -47,6 +47,7 @@ func (h *Hub) run() {
 			h.lock.Lock()
 			h.clients[client] = true
 			h.lock.Unlock()
+			log.Println("Client connecté !")
 		case client := <-h.unregister:
 			h.lock.Lock()
 			if _, ok := h.clients[client]; ok {
@@ -67,8 +68,13 @@ func (h *Hub) run() {
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil { return }
+	if err != nil {
+		// LA CORRECTION EST ICI : ON AFFICHE L'ERREUR !
+		log.Printf("ERREUR LORS DE L'UPGRADE WEBSOCKET: %v", err)
+		return
+	}
 	defer ws.Close()
+
 	hub.register <- ws
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
@@ -79,16 +85,11 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 //export_php:namespace Realtime
-
 //export_php:function start(): void
-func start() {
-	getHubAndStartServer()
-}
+func start() { getHubAndStartServer() }
 //export_php:function broadcast(string $message): void
 func broadcast(message *C.zend_string) {
 	getHubAndStartServer()
 	goMessage := frankenphp.GoString(unsafe.Pointer(message))
-	if hub != nil {
-		hub.broadcast <- []byte(goMessage)
-	}
+	if hub != nil { hub.broadcast <- []byte(goMessage) }
 }
