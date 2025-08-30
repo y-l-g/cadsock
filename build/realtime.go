@@ -24,6 +24,7 @@ type Hub struct {
 	lock       sync.RWMutex
 }
 
+
 var hub *Hub
 var once sync.Once
 
@@ -38,7 +39,7 @@ func getHubAndStartServer() {
 		}
 		go hub.run()
 		http.HandleFunc("/ws", handleConnections)
-		log.Println("Serveur WebSocket démarré une seule fois sur :8081")
+		log.Println("Serveur WebSocket démarréee une seule fois sur :8081")
 		go func() {
 			if err := http.ListenAndServe(":8081", nil); err != nil {
 				log.Printf("Erreur du serveur WebSocket: %v", err)
