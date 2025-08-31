@@ -1,4 +1,3 @@
-<!-- app/index.php -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,62 +6,45 @@
 </head>
 <body>
     <h1>WebSocket Channels</h1>
+    <div id="connection-status" style="color: red;">Disconnected</div>
+    <hr>
     <div>
-        <label for="channel">Channel to subscribe to:</label>
+        <label for="channel">Channel:</label>
         <input type="text" id="channel" value="news">
-        <button id="subscribe">Subscribe</button>
+        <button id="subscribe">Subscribe to Channel</button>
     </div>
     <hr>
-    <h2>Messages received on subscribed channels:</h2>
+    <h2>Messages received:</h2>
     <ul id="messages"></ul>
 
     <script>
         const channelInput = document.getElementById('channel');
         const subscribeBtn = document.getElementById('subscribe');
         const messagesList = document.getElementById('messages');
+        const statusDiv = document.getElementById('connection-status');
         let socket;
 
-        function connectAndSubscribe() {
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.close();
-            }
-
-            const channel = channelInput.value;
-            if (!channel) {
-                alert('Please enter a channel name.');
-                return;
-            }
-
+        // Établit la connexion WebSocket une seule fois au chargement de la page.
+        function connect() {
             socket = new WebSocket("ws://localhost:8080/ws");
 
             socket.onopen = function(event) {
                 console.log('WebSocket connection opened.');
-                // Subscribe to the channel
-                const subscribeMsg = {
-                    action: "subscribe",
-                    channel: channel
-                };
-                socket.send(JSON.stringify(subscribeMsg));
-                console.log(`Sent subscription request for channel: ${channel}`);
-                
-                let message = document.createElement("li");
-                message.style.color = 'green';
-                message.textContent = `Successfully connected and subscribed to channel "${channel}".`;
-                messagesList.appendChild(message);
+                statusDiv.textContent = 'Connected';
+                statusDiv.style.color = 'green';
             };
 
             socket.onmessage = function(event) {
                 let message = document.createElement("li");
-                message.appendChild(document.createTextNode(event.data));
+                message.textContent = event.data;
                 messagesList.appendChild(message);
             };
 
             socket.onclose = function(event) {
                 console.log('WebSocket connection closed.');
-                let message = document.createElement("li");
-                message.style.color = 'red';
-                message.textContent = "Connection closed.";
-                messagesList.appendChild(message);
+                statusDiv.textContent = 'Disconnected. Attempting to reconnect in 3 seconds...';
+                statusDiv.style.color = 'red';
+                setTimeout(connect, 3000);
             };
 
             socket.onerror = function(error) {
@@ -70,7 +52,34 @@
             };
         }
 
-        subscribeBtn.addEventListener('click', connectAndSubscribe);
+        function subscribeToChannel() {
+            const channel = channelInput.value;
+            if (!channel) {
+                alert('Please enter a channel name.');
+                return;
+            }
+
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                alert('Not connected to the WebSocket server.');
+                return;
+            }
+
+            const subscribeMsg = {
+                action: "subscribe",
+                channel: channel
+            };
+            socket.send(JSON.stringify(subscribeMsg));
+            console.log(`Sent subscription request for channel: ${channel}`);
+            
+            let message = document.createElement("li");
+            message.style.color = 'blue';
+            message.textContent = `Subscription request sent for channel "${channel}".`;
+            messagesList.appendChild(message);
+        }
+
+        subscribeBtn.addEventListener('click', subscribeToChannel);
+
+        connect();
     </script>
 </body>
 </html>

@@ -1,12 +1,15 @@
 # FrankenPHP Realtime Project
 
-This project implements a WebSocket broadcast service, architected around two distinct Go components: a Caddy module for connection management and a PHP extension to interface with the application code.
+A channel-based WebSocket broadcast service built with a Go Caddy module and a Go PHP extension.
 
-## Technical Architecture
+## Architecture
 
--   **Caddy Module (`handler`)**: An HTTP handler that intercepts requests on `/ws`, upgrades them to WebSocket connections using the `github.com/gorilla/websocket` library, and maintains them in a shared pool.
--   **PHP Extension (`broadcast`)**: Exposes a native `broadcast(string)` function to the PHP environment. This function acts as a Foreign Function Interface (FFI) bridge to trigger a message broadcast to the WebSocket client pool managed by the Caddy module.
--   **Application (`app`)**: Contains the `Caddyfile`, a JavaScript WebSocket client (`index.php`), and the dispatch script (`send.php`).
+The system uses a "Hub and Spoke" architecture for managing connections and messages, ensuring concurrency safety and performance.
+
+-   **Hub (`handler/hub.go`):** The central component. It runs in a single goroutine and manages all state (channels, client subscriptions) via Go channels, avoiding the need for complex mutex locking in the core logic.
+-   **Client (`handler/hub.go`):** A wrapper for each `*websocket.Conn`. Each client runs two dedicated goroutines (`readPump`, `writePump`) to handle I/O, respecting the one-reader/one-writer concurrency model of `gorilla/websocket`.
+-   **Caddy Module (`handler/handler.go`):** The HTTP entry point. It upgrades HTTP requests to WebSocket connections and registers new `Client` instances with the `Hub`.
+-   **PHP Extension (`broadcast/broadcast.go`):** An FFI bridge that exposes a native `broadcast()` function to PHP. It sends messages into the `Hub`'s broadcast channel for distribution.
 
 ## Project Structure
 
@@ -21,94 +24,91 @@ realtime/
 │   └── go.mod
 └── handler/
     ├── handler.go
+    ├── hub.go
     └── go.mod
 ```
 
-## Prerequisites
+## API Reference
 
--   Go (>= 1.25.0)
--   PHP with development headers (`php-config` must be available)
--   Source code of the PHP version being used
+### PHP API
 
-## Build and Run Procedure
+-   `broadcast(string $channel, string $message): void`
+    -   Sends `$message` to all clients currently subscribed to `$channel`.
 
-### 1. Install the `frankenphp` binary
+### Client-Side Protocol (JSON)
 
-A `frankenphp` binary is required for the `extension-init` tool.
+Clients communicate with the server over the WebSocket using simple JSON objects.
 
+-   **Subscribe to a channel:**
+    ```json
+    {
+        "action": "subscribe",
+        "channel": "channel_name"
+    }
+    ```
+-   **Unsubscribe from a channel:**
+    ```json
+    {
+        "action": "unsubscribe",
+        "channel": "channel_name"
+    }
+    ```
+
+## Build Procedure
+
+**Prerequisites:** Go (>= 1.25), PHP development headers (`php-config`), PHP source code.
+
+**1. Install `frankenphp` binary**
+Required for the `extension-init` tool.
 ```bash
 curl -O https://github.com/dunglas/frankenphp/releases/latest/download/frankenphp-linux-x86_64
+chmod +x frankenphp-linux-x86_64
 sudo mv frankenphp-linux-x86_64 /usr/local/bin/frankenphp
 ```
 
-### 2. Generate the PHP Extension
-
-This step generates the CGO stubs and binding code in the `broadcast/build/` directory.
-
+**2. Generate Extension Stubs**
+Creates CGO binding code in `broadcast/build/`.
 ```bash
-# From the realtime/ project root
-# Adjust the path to your PHP sources.
+# From project root, adjust PHP source path
 GEN_STUB_SCRIPT=../php-8.4.11/build/gen_stub.php frankenphp extension-init broadcast/broadcast.go
 ```
 
-### 3. Compile the Custom Binary
-
-Compile a FrankenPHP binary that includes both Go modules.
-
+**3. Compile Custom Binary**
+Builds the final `frankenphp` binary with local Go modules statically linked.
 ```bash
-# From the realtime/ project root
+# From project root
 CGO_ENABLED=1 \
-XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s' -tags=nobadger,nomysql,nopgx,nowatcher" \
+XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s'" \
 CGO_CFLAGS=$(php-config --includes) \
 CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
 xcaddy build \
     --output app/frankenphp \
-    --with github.com/y-l-g/realtime/handler@main \
-    --with github.com/y-l-g/realtime/broadcast/build@main \
+    --with github.com/y-l-g/realtime/handler=./handler \
+    --with github.com/y-l-g/realtime/broadcast/build=./broadcast/build \
     --with github.com/dunglas/frankenphp/caddy \
     --with github.com/dunglas/caddy-cbrotli
 ```
 
-The resulting binary (`app/frankenphp`) is statically linked with our WebSocket logic and PHP extension.
-
-### 4. Run
-
+**4. Run Server**
 ```bash
 cd app
-./frankenphp run
+./frankenphp run```
+
+## Configuration
+
+The `app/Caddyfile` is configured via environment variables with sensible defaults.
+
+-   `SERVER_ADDRESS`: The address and port for Caddy to listen on. (Default: `:8080`)
+-   `ALLOWED_ORIGINS`: A space-separated list of WebSocket origins to allow. (Default: `http://localhost:8080`)
+
+**Example (Production):**
+```bash
+SERVER_ADDRESS=":443" ALLOWED_ORIGINS="https://yourdomain.com" ./frankenphp run
 ```
-
-The server is now listening on `localhost:8080`.
-
-## Testing the Functionality
-
-1.  **Client**: Open `http://localhost:8080` in a browser. The WebSocket connection is established.
-2.  **Server**: Make a request to `http://localhost:8080/send.php`.
-3.  **Result**: The message sent via `send.php` instantly appears on the `index.php` page.
-
-## Technical Implementation Details
-
-### `handler` Module (`handler.go`)
-
--   **Role**: Manages the lifecycle of WebSocket connections.
--   **Caddy Implementation**: Registers an `http.handlers.go_handler` module. The `go_handler` directive in the `Caddyfile` activates this module.
--   **Connection Management**: The `gorilla/websocket` library is used via its `websocket.Upgrader` to switch protocols from HTTP to WebSocket.
--   **Concurrency**: Client connections (`*websocket.Conn`) are stored in a global map `Clients`. Access to this map (add, delete, iterate) is synchronized using a `sync.Mutex` (`ClientsMu`) to ensure thread-safety.
--   **Public API**: The `BroadcastMessage(msg []byte)` function is the only one exported. It takes a `[]byte` argument for performance reasons, as the underlying `websocket.Conn.WriteMessage` function expects this type, thus avoiding a `string` -> `[]byte` conversion on every broadcast.
-
-### `broadcast` Extension (`broadcast.go`)
-
--   **Role**: Provides an entry point from PHP to the Go broadcast logic.
--   **Go-PHP Binding**: The `//export_php:function broadcast(string $message): void` directive is used by the `frankenphp extension-init` tool to generate the FFI code.
--   **Data Flow**:
-    1.  PHP calls `broadcast("...")`.
-    2.  The PHP engine passes a `*C.zend_string` to the Go `broadcast` function.
-    3.  `frankenphp.GoString(unsafe.Pointer(message))` converts the `*C.zend_string` into a Go `string`.
-    4.  The Go `string` is cast to a `[]byte`.
-    5.  This `[]byte` is passed to `handler.BroadcastMessage()`.
 
 ## Resources
 
 -   **FrankenPHP - Writing Extensions:** [https://frankenphp.dev/docs/extensions/](https://frankenphp.dev/docs/extensions/)
 -   **FrankenPHP - Compiling:** [https://frankenphp.dev/docs/compile/](https://frankenphp.dev/docs/compile/)
 -   **Caddy - Extending Caddy:** [https://caddyserver.com/docs/extending-caddy](https://caddyserver.com/docs/extending-caddy)
+

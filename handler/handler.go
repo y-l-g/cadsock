@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"sync"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"

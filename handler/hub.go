@@ -9,28 +9,26 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 512
+)
+
 type Message struct {
 	Channel string
 	Data    []byte
 }
-
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
 	Channel string `json:"channel"`
 }
-
 type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
 	send chan []byte
 }
-
-const (
-	writeWait = 10 * time.Second
-	pongWait = 60 * time.Second
-	pingPeriod = (pongWait * 9) / 10
-	maxMessageSize = 512
-)
 
 func (c *Client) readPump() {
 	defer func() {
@@ -40,7 +38,6 @@ func (c *Client) readPump() {
 	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -49,13 +46,11 @@ func (c *Client) readPump() {
 			}
 			break
 		}
-
 		var msg ClientProtocolMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
 			log.Printf("error decoding client message: %v", err)
 			continue
 		}
-
 		switch msg.Action {
 		case "subscribe":
 			c.hub.subscribe <- subscription{client: c, channel: msg.Channel}
@@ -64,7 +59,6 @@ func (c *Client) readPump() {
 		}
 	}
 }
-
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -76,7 +70,6 @@ func (c *Client) writePump() {
 		case message, ok := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// Le hub a fermé le canal.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -91,13 +84,14 @@ func (c *Client) writePump() {
 }
 
 type Hub struct {
-	mu           sync.RWMutex
-	channels     map[string]map[*Client]bool
-	broadcast    chan *Message
-	register     chan *Client
-	unregister   chan *Client
-	subscribe    chan subscription
-	unsubscribe  chan subscription
+	mu          sync.RWMutex
+	channels    map[string]map[*Client]bool
+	clients     map[*Client]map[string]bool // L'index inversé pour un nettoyage efficace
+	broadcast   chan *Message
+	register    chan *Client
+	unregister  chan *Client
+	subscribe   chan subscription
+	unsubscribe chan subscription
 }
 
 type subscription struct {
@@ -107,12 +101,13 @@ type subscription struct {
 
 func NewHub() *Hub {
 	return &Hub{
-		broadcast:    make(chan *Message),
-		register:     make(chan *Client),
-		unregister:   make(chan *Client),
-		subscribe:    make(chan subscription),
-		unsubscribe:  make(chan subscription),
-		channels:     make(map[string]map[*Client]bool),
+		broadcast:   make(chan *Message),
+		register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		subscribe:   make(chan subscription),
+		unsubscribe: make(chan subscription),
+		channels:    make(map[string]map[*Client]bool),
+		clients:     make(map[*Client]map[string]bool), // Initialisation de la nouvelle map
 	}
 }
 
@@ -120,25 +115,35 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
+			h.mu.Lock()
+			h.clients[client] = make(map[string]bool)
+			h.mu.Unlock()
+
 		case client := <-h.unregister:
 			h.mu.Lock()
-			for channel, clients := range h.channels {
-				if _, ok := clients[client]; ok {
-					delete(clients, client)
-					if len(clients) == 0 {
-						delete(h.channels, channel)
+			if channels, ok := h.clients[client]; ok {
+				for channel := range channels {
+					if clientsInChannel, ok := h.channels[channel]; ok {
+						delete(clientsInChannel, client)
+						if len(clientsInChannel) == 0 {
+							delete(h.channels, channel)
+						}
 					}
 				}
+				delete(h.clients, client)
 			}
 			h.mu.Unlock()
 			close(client.send)
+
 		case sub := <-h.subscribe:
 			h.mu.Lock()
 			if _, ok := h.channels[sub.channel]; !ok {
 				h.channels[sub.channel] = make(map[*Client]bool)
 			}
 			h.channels[sub.channel][sub.client] = true
+			h.clients[sub.client][sub.channel] = true
 			h.mu.Unlock()
+
 		case sub := <-h.unsubscribe:
 			h.mu.Lock()
 			if clients, ok := h.channels[sub.channel]; ok {
@@ -147,8 +152,13 @@ func (h *Hub) Run() {
 					delete(h.channels, sub.channel)
 				}
 			}
+			if channels, ok := h.clients[sub.client]; ok {
+				delete(channels, sub.channel)
+			}
 			h.mu.Unlock()
+
 		case message := <-h.broadcast:
+			// La logique de diffusion reste la même.
 			h.mu.RLock()
 			if clients, ok := h.channels[message.Channel]; ok {
 				for client := range clients {
@@ -156,6 +166,7 @@ func (h *Hub) Run() {
 					case client.send <- message.Data:
 					default:
 						close(client.send)
+						delete(clients, client)
 					}
 				}
 			}
