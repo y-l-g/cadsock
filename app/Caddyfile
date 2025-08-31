@@ -7,9 +7,8 @@
 {$SERVER_ADDRESS::8080}
 
 handle /ws {
-    go_handler {
-        origins {$ALLOWED_ORIGINS:http://localhost:8080}
-    }
+    header Origin {$ALLOWED_ORIGINS:http://localhost:8080}
+    go_handler 
 }
 
 php_server
