@@ -1,12 +1,15 @@
 {
-	frankenphp
-	order go_handler before file_server
+	http_port {$SERVER_ADDRESS:8080}
+    frankenphp
+    order go_handler before file_server
 }
 
-:8080
+{$SERVER_ADDRESS::8080}
 
 handle /ws {
-	go_handler
+    go_handler {
+        origins {$ALLOWED_ORIGINS:http://localhost:8080}
+    }
 }
 
 php_server

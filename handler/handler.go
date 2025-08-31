@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
@@ -16,18 +17,15 @@ var (
 	ClientsMu sync.Mutex
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
 
-type GoHandler struct{}
+type GoHandler struct {
+	Origins []string `json:"origins,omitempty"`
+}
+
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.go_handler",
@@ -35,20 +33,46 @@ func (GoHandler) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	return new(GoHandler), nil
-}
-
-func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	HandleWebSocket(w, r)
+func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		for d.NextBlock(0) {
+			switch d.Val() {
+			case "origins":
+				h.Origins = d.RemainingArgs()
+				if len(h.Origins) == 0 {
+					return d.ArgErr() 
+				}
+			default:
+				return d.Errf("unknown subdirective '%s'", d.Val())
+			}
+		}
+	}
 	return nil
 }
 
-func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	var handler GoHandler
+	err := handler.UnmarshalCaddyfile(h.Dispenser)
+	return &handler, err
+}
+
+func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	var upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			for _, allowedOrigin := range h.Origins {
+				if origin == allowedOrigin {
+					return true 
+				}
+			}
+			log.Printf("WebSocket connection from origin %s rejected", origin)
+			return false
+		},
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("upgrade:", err)
-		return
+		return nil
 	}
 	defer conn.Close()
 
@@ -67,6 +91,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	
+	return nil
 }
 
 func BroadcastMessage(msg []byte) {
@@ -85,4 +111,5 @@ func BroadcastMessage(msg []byte) {
 var (
 	_ caddy.Module                = (*GoHandler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*GoHandler)(nil)
+	_ caddyfile.Unmarshaler       = (*GoHandler)(nil) // On implémente maintenant cette interface.
 )

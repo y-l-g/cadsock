@@ -26,7 +26,7 @@ realtime/
 
 ## Prerequisites
 
--   Go (>= 1.21)
+-   Go (>= 1.25.0)
 -   PHP with development headers (`php-config` must be available)
 -   Source code of the PHP version being used
 
@@ -38,7 +38,6 @@ A `frankenphp` binary is required for the `extension-init` tool.
 
 ```bash
 curl -O https://github.com/dunglas/frankenphp/releases/latest/download/frankenphp-linux-x86_64
-chmod +x frankenphp-linux-x86_64
 sudo mv frankenphp-linux-x86_64 /usr/local/bin/frankenphp
 ```
 
@@ -49,7 +48,7 @@ This step generates the CGO stubs and binding code in the `broadcast/build/` dir
 ```bash
 # From the realtime/ project root
 # Adjust the path to your PHP sources.
-GEN_STUB_SCRIPT=../php-8.3.11/build/gen_stub.php frankenphp extension-init broadcast/broadcast.go
+GEN_STUB_SCRIPT=../php-8.4.11/build/gen_stub.php frankenphp extension-init broadcast/broadcast.go
 ```
 
 ### 3. Compile the Custom Binary
@@ -59,13 +58,15 @@ Compile a FrankenPHP binary that includes both Go modules.
 ```bash
 # From the realtime/ project root
 CGO_ENABLED=1 \
-XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s'" \
+XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s' -tags=nobadger,nomysql,nopgx,nowatcher" \
 CGO_CFLAGS=$(php-config --includes) \
 CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
 xcaddy build \
     --output app/frankenphp \
     --with github.com/y-l-g/realtime/handler@main \
-    --with github.com/y-l-g/realtime/broadcast/build@main
+    --with github.com/y-l-g/realtime/broadcast/build@main \
+    --with github.com/dunglas/frankenphp/caddy \
+    --with github.com/dunglas/caddy-cbrotli
 ```
 
 The resulting binary (`app/frankenphp`) is statically linked with our WebSocket logic and PHP extension.
