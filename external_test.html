@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>External WebSocket Test</title>
+</head>
+<body>
+    <h1>Attempting to connect from a different origin...</h1>
+    <p>Check the browser's developer console for errors.</p>
+
+    <script>
+        console.log("Attempting to connect to ws://localhost:8080/ws");
+        let socket = new WebSocket("ws://localhost:8080/ws");
+
+        socket.onopen = function(event) {
+            console.log("Connection successful! This should not happen.");
+        };
+
+        socket.onerror = function(event) {
+            console.error("WebSocket error observed:", event);
+        };
+
+        socket.onclose = function(event) {
+            console.log("WebSocket connection closed.", event);
+        };
+    </script>
+</body>
+</html>

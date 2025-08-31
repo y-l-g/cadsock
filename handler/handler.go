@@ -1,15 +1,16 @@
 package handler
 
 import (
-	"log"
+	"context"
 	"net/http"
 	"sync"
 
-	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/gorilla/websocket"
+	"github.comcom/caddyserver/caddy/v2"
+	"github.comcom/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.comcom/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.comcom/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.comcom/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 var (
@@ -24,6 +25,9 @@ func init() {
 
 type GoHandler struct {
 	Origins []string `json:"origins,omitempty"`
+
+	// Le logger sera initialisé par Caddy.
+	log *zap.Logger
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -33,6 +37,14 @@ func (GoHandler) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
+// Provision est appelée par Caddy après le parsing pour finaliser la configuration.
+// C'est le bon endroit pour obtenir un logger.
+func (h *GoHandler) Provision(ctx caddy.Context) error {
+	h.log = ctx.Logger() // Obtient un logger préfixé pour notre module.
+	h.log.Info("handler provisioned", zap.Strings("allowed_origins", h.Origins))
+	return nil
+}
+
 func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		for d.NextBlock(0) {
@@ -40,7 +52,7 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			case "origins":
 				h.Origins = d.RemainingArgs()
 				if len(h.Origins) == 0 {
-					return d.ArgErr() 
+					return d.ArgErr()
 				}
 			default:
 				return d.Errf("unknown subdirective '%s'", d.Val())
@@ -57,21 +69,28 @@ func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 }
 
 func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	h.log.Info("ServeHTTP called", zap.Strings("configured_origins", h.Origins))
+
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
+			h.log.Info("CheckOrigin called", zap.String("request_origin", origin))
+
 			for _, allowedOrigin := range h.Origins {
 				if origin == allowedOrigin {
-					return true 
+					h.log.Info("origin is allowed", zap.String("origin", origin))
+					return true
 				}
 			}
-			log.Printf("WebSocket connection from origin %s rejected", origin)
+			
+			h.log.Warn("origin is NOT allowed", zap.String("origin", origin))
 			return false
 		},
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		h.log.Error("failed to upgrade connection", zap.Error(err))
 		return nil
 	}
 	defer conn.Close()
@@ -102,6 +121,7 @@ func BroadcastMessage(msg []byte) {
 	for client := range Clients {
 		err := client.WriteMessage(websocket.TextMessage, msg)
 		if err != nil {
+			// On pourrait vouloir un logger ici aussi, mais restons simple pour l'instant.
 			client.Close()
 			delete(Clients, client)
 		}
@@ -111,5 +131,6 @@ func BroadcastMessage(msg []byte) {
 var (
 	_ caddy.Module                = (*GoHandler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*GoHandler)(nil)
-	_ caddyfile.Unmarshaler       = (*GoHandler)(nil) // On implémente maintenant cette interface.
+	_ caddyfile.Unmarshaler       = (*GoHandler)(nil)
+	_ caddy.Provisioner           = (*GoHandler)(nil) // On implémente maintenant Provisioner.
 )
