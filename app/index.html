@@ -1,3 +1,4 @@
+<!-- app/index.php -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,16 +6,71 @@
     <title>WebSocket Test</title>
 </head>
 <body>
-    <h1>Messages reçus :</h1>
+    <h1>WebSocket Channels</h1>
+    <div>
+        <label for="channel">Channel to subscribe to:</label>
+        <input type="text" id="channel" value="news">
+        <button id="subscribe">Subscribe</button>
+    </div>
+    <hr>
+    <h2>Messages received on subscribed channels:</h2>
     <ul id="messages"></ul>
+
     <script>
-        let socket = new WebSocket("ws://localhost:8080/ws");
-        socket.onmessage = function(event) {
-            let messages = document.getElementById("messages");
-            let message = document.createElement("li");
-            message.appendChild(document.createTextNode(event.data));
-            messages.appendChild(message);
-        };
+        const channelInput = document.getElementById('channel');
+        const subscribeBtn = document.getElementById('subscribe');
+        const messagesList = document.getElementById('messages');
+        let socket;
+
+        function connectAndSubscribe() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+
+            const channel = channelInput.value;
+            if (!channel) {
+                alert('Please enter a channel name.');
+                return;
+            }
+
+            socket = new WebSocket("ws://localhost:8080/ws");
+
+            socket.onopen = function(event) {
+                console.log('WebSocket connection opened.');
+                // Subscribe to the channel
+                const subscribeMsg = {
+                    action: "subscribe",
+                    channel: channel
+                };
+                socket.send(JSON.stringify(subscribeMsg));
+                console.log(`Sent subscription request for channel: ${channel}`);
+                
+                let message = document.createElement("li");
+                message.style.color = 'green';
+                message.textContent = `Successfully connected and subscribed to channel "${channel}".`;
+                messagesList.appendChild(message);
+            };
+
+            socket.onmessage = function(event) {
+                let message = document.createElement("li");
+                message.appendChild(document.createTextNode(event.data));
+                messagesList.appendChild(message);
+            };
+
+            socket.onclose = function(event) {
+                console.log('WebSocket connection closed.');
+                let message = document.createElement("li");
+                message.style.color = 'red';
+                message.textContent = "Connection closed.";
+                messagesList.appendChild(message);
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket Error:', error);
+            };
+        }
+
+        subscribeBtn.addEventListener('click', connectAndSubscribe);
     </script>
 </body>
 </html>

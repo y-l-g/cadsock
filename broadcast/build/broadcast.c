@@ -27,10 +27,12 @@ zend_module_entry broadcast_module_entry = {STANDARD_MODULE_HEADER,
 
 PHP_FUNCTION(broadcast)
 {
+    zend_string *channel = NULL;
     zend_string *message = NULL;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(channel)
         Z_PARAM_STR(message)
     ZEND_PARSE_PARAMETERS_END();
-    broadcast(message);
+    broadcast(channel, message);
 }
 

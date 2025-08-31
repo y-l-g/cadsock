@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"log"
 	"net/http"
 	"sync"
 
@@ -11,12 +10,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var (
-	Clients   = make(map[*websocket.Conn]bool)
-	ClientsMu sync.Mutex
-)
-
 var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
@@ -25,6 +21,7 @@ var upgrader = websocket.Upgrader{
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
+	go PubSubHub.Run()
 }
 
 type GoHandler struct{}
@@ -43,41 +40,24 @@ func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("upgrade error:", err)
-		return nil
+		return err
 	}
-	defer conn.Close()
 
-	ClientsMu.Lock()
-	Clients[conn] = true
-	ClientsMu.Unlock()
+	client := &Client{hub: PubSubHub, conn: conn, send: make(chan []byte, 256)}
+	client.hub.register <- client
 
-	defer func() {
-		ClientsMu.Lock()
-		delete(Clients, conn)
-		ClientsMu.Unlock()
-	}()
-
-	for {
-		if _, _, err := conn.NextReader(); err != nil {
-			break
-		}
-	}
+	go client.writePump()
+	client.readPump()
 
 	return nil
 }
 
-func BroadcastMessage(msg []byte) {
-	ClientsMu.Lock()
-	defer ClientsMu.Unlock()
-
-	for client := range Clients {
-		err := client.WriteMessage(websocket.TextMessage, msg)
-		if err != nil {
-			client.Close()
-			delete(Clients, client)
-		}
+func BroadcastToChannel(channel string, msg []byte) {
+	message := &Message{
+		Channel: channel,
+		Data:    msg,
 	}
+	PubSubHub.broadcast <- message
 }
 
 var (

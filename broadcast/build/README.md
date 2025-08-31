@@ -7,11 +7,12 @@ Auto-generated PHP extension from Go code.
 ### broadcast
 
 ```php
-broadcast(string $message): void
+broadcast(string $channel, string $message): void
 ```
 
 **Parameters:**
 
+- `channel` (string)
 - `message` (string)
 
 **Returns:** void

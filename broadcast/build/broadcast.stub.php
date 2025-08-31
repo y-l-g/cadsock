@@ -2,6 +2,6 @@
 
 /** @generate-class-entries */
 
-function broadcast(string $message): void {}
+function broadcast(string $channel, string $message): void {}
 
 

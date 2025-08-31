@@ -17,9 +17,9 @@ func init() {
 
 
 //export broadcast
-func broadcast(message *C.zend_string) {
-	goString  := frankenphp.GoString(unsafe.Pointer(message))
-	msgBytes := []byte(goString)
-	handler.BroadcastMessage(msgBytes)
+func broadcast(channel *C.zend_string, message *C.zend_string) {
+	goChannel := frankenphp.GoString(unsafe.Pointer(channel))
+	goMessage := []byte(frankenphp.GoString(unsafe.Pointer(message)))
+	handler.BroadcastToChannel(goChannel, goMessage)
 }
 

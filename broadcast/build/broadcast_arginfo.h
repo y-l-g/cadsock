@@ -1,7 +1,8 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: ac46b3b27c0285283610288339993a7a44f64f8b */
+ * Stub hash: f92a37c0da8dff6afcbef2b457d2321c5fdef226 */
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_broadcast, 0, 1, IS_VOID, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_broadcast, 0, 2, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, channel, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
