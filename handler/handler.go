@@ -5,11 +5,11 @@ import (
 	"net/http"
 	"sync"
 
-	"github.comcom/caddyserver/caddy/v2"
-	"github.comcom/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.comcom/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
-	"github.comcom/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.comcom/gorilla/websocket"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
