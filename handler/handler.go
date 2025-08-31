@@ -52,7 +52,6 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// ON UTILISE ClientsMu ET Clients (avec majuscule)
 	ClientsMu.Lock()
 	Clients[conn] = true
 	ClientsMu.Unlock()
@@ -66,6 +65,19 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		if _, _, err := conn.NextReader(); err != nil {
 			break
+		}
+	}
+}
+
+func BroadcastMessage(msg []byte) {
+	ClientsMu.Lock()
+	defer ClientsMu.Unlock()
+
+	for client := range Clients {
+		err := client.WriteMessage(websocket.TextMessage, msg)
+		if err != nil {
+			client.Close()
+			delete(Clients, client)
 		}
 	}
 }
