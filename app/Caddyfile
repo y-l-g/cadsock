@@ -6,8 +6,12 @@
 
 {$SERVER_ADDRESS::8080}
 
+@not_allowed_origins {
+    not header Origin {$ALLOWED_ORIGINS:http://localhost:8080}
+}
+
 handle /ws {
-    header Origin {$ALLOWED_ORIGINS:http://localhost:8080}
+    abort @not_allowed_origins
     go_handler 
 }
 
