@@ -62,7 +62,6 @@ Clients communicate with the server over the WebSocket using simple JSON objects
 Required for the `extension-init` tool.
 ```bash
 curl -O https://github.com/dunglas/frankenphp/releases/latest/download/frankenphp-linux-x86_64
-chmod +x frankenphp-linux-x86_64
 sudo mv frankenphp-linux-x86_64 /usr/local/bin/frankenphp
 ```
 
@@ -71,6 +70,7 @@ Creates CGO binding code in `broadcast/build/`.
 ```bash
 # From project root, adjust PHP source path
 GEN_STUB_SCRIPT=../php-8.4.11/build/gen_stub.php frankenphp extension-init broadcast/broadcast.go
+cp broadcast/go.mod broadcast/build/go.mod
 ```
 
 **3. Compile Custom Binary**
