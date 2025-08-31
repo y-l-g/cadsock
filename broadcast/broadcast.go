@@ -12,6 +12,6 @@ import (
 //export_php:function broadcast(string $message): void
 func broadcast(message *C.zend_string) {
 	msg := frankenphp.GoString(unsafe.Pointer(message))
-
-	handler.BroadcastMessage(msg)
+	msgBytes := []byte(goString)
+	handler.BroadcastMessage(msgBytes)
 }
