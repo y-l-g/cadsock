@@ -92,7 +92,8 @@ xcaddy build \
 **4. Run Server**
 ```bash
 cd app
-./frankenphp run```
+./frankenphp run
+```
 
 ## Configuration
 
