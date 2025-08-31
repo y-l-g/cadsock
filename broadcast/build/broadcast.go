@@ -18,7 +18,7 @@ func init() {
 
 //export broadcast
 func broadcast(message *C.zend_string) {
-	msg := frankenphp.GoString(unsafe.Pointer(message))
+	goString  := frankenphp.GoString(unsafe.Pointer(message))
 	msgBytes := []byte(goString)
 	handler.BroadcastMessage(msgBytes)
 }
