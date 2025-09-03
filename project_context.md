@@ -39,18 +39,12 @@ handle /ws {
     abort @not_allowed_origins
     
     go_handler {
-        # Par défaut, le driver "memory" est utilisé.
-        # Pour activer Redis pour le scaling horizontal, décommentez les lignes suivantes.
         # driver redis
         # redis_address localhost:6379
-
-        # (Optionnel) Spécifiez un endpoint d'authentification interne différent.
-        # La valeur par défaut est "http://localhost:8080/auth.php".
         # auth_endpoint http://localhost:8080/api/auth
     }
 }
 
-# Le serveur PHP gère l'interface web et le endpoint interne /auth.php
 php_server
 ```
 
@@ -63,9 +57,6 @@ php_server
 
 header('Content-Type: application/json');
 
-// Ceci est une logique d'authentification factice.
-// Dans une application réelle, vous valideriez un cookie de session ou un token JWT
-// auprès de votre base de données ou de votre gestionnaire de session.
 if (isset($_COOKIE['AUTH_TOKEN']) && str_starts_with($_COOKIE['AUTH_TOKEN'], 'user-')) {
     http_response_code(200);
     echo json_encode(['id' => $_COOKIE['AUTH_TOKEN']]);
@@ -80,31 +71,242 @@ echo json_encode(['error' => 'Unauthorized']);
 
 ### `app/index.php`
 
-*(Inchangé)*
+```php
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket Test</title>
+</head>
+<body>
+    <h1>WebSocket Channels</h1>
+
+    <div>
+        <strong>Authentication Status:</strong>
+        <span id="auth-status" style="color: red;">Not authenticated</span>
+    </div>
+
+    <form id="login-form" style="margin-top: 10px;">
+        <label for="userId">User ID:</label>
+        <input type="text" id="userId" value="user-123">
+        <button type-="submit">Login</button>
+        <button type="button" id="logout">Logout</button>
+    </form>
+
+    <hr>
+    <div id="websocket-ui" style="display: none;">
+        <div id="connection-status" style="color: red;">Disconnected</div>
+        <hr>
+        <div>
+            <label for="channel">Channel:</label>
+            <input type="text" id="channel" value="news">
+            <button id="subscribe">Subscribe to Channel</button>
+        </div>
+        <hr>
+        <h2>Messages received:</h2>
+        <ul id="messages"></ul>
+    </div>
+
+    <script>
+        const authStatus = document.getElementById('auth-status');
+        const loginForm = document.getElementById('login-form');
+        const userIdInput = document.getElementById('userId');
+        const logoutBtn = document.getElementById('logout');
+        const websocketUi = document.getElementById('websocket-ui');
+
+        const channelInput = document.getElementById('channel');
+        const subscribeBtn = document.getElementById('subscribe');
+        const messagesList = document.getElementById('messages');
+        const statusDiv = document.getElementById('connection-status');
+        let socket;
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
+        function connect() {
+            socket = new WebSocket("ws://localhost:8080/ws");
+
+            socket.onopen = function(event) {
+                console.log('WebSocket connection opened.');
+                statusDiv.textContent = 'Connected';
+                statusDiv.style.color = 'green';
+            };
+
+            socket.onmessage = function(event) {
+                let message = document.createElement("li");
+                message.textContent = event.data;
+                messagesList.appendChild(message);
+            };
+
+            socket.onclose = function(event) {
+                console.log('WebSocket connection closed.', event.reason);
+                statusDiv.textContent = `Disconnected. (Code: ${event.code})`;
+                statusDiv.style.color = 'red';
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket Error:', error);
+            };
+        }
+
+        function subscribeToChannel() {
+            const channel = channelInput.value;
+            if (!channel) {
+                alert('Please enter a channel name.');
+                return;
+            }
+
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                alert('Not connected to the WebSocket server.');
+                return;
+            }
+
+            const subscribeMsg = {
+                action: "subscribe",
+                channel: channel
+            };
+            socket.send(JSON.stringify(subscribeMsg));
+            console.log(`Sent subscription request for channel: ${channel}`);
+            
+            let message = document.createElement("li");
+            message.style.color = 'blue';
+            message.textContent = `Subscription request sent for channel "${channel}".`;
+            messagesList.appendChild(message);
+        }
+
+        loginForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const userId = userIdInput.value;
+            if (userId) {
+                document.cookie = `AUTH_TOKEN=${userId};path=/`;
+                window.location.reload();
+            }
+        });
+
+        logoutBtn.addEventListener('click', () => {
+            document.cookie = 'AUTH_TOKEN=;path=/;expires=Thu, 01 Jan 1970 00:00:01 GMT';
+            window.location.reload();
+        });
+
+        subscribeBtn.addEventListener('click', subscribeToChannel);
+        
+        const authToken = getCookie('AUTH_TOKEN');
+        if (authToken) {
+            authStatus.textContent = `Authenticated as ${authToken}`;
+            authStatus.style.color = 'green';
+            websocketUi.style.display = 'block';
+            connect();
+        } else {
+            authStatus.textContent = 'Not authenticated';
+            authStatus.style.color = 'red';
+            websocketUi.style.display = 'none';
+        }
+    </script>
+</body>
+</html>
+```
 
 ---
 
 ### `app/send.php`
 
-*(Inchangé)*
+```php
+<?php
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $channel = $_POST['channel'] ?? 'default';
+    $message = $_POST['message'] ?? 'empty message';
+
+    if (function_exists('broadcast')) {
+        broadcast($channel, "($channel) " . $message . " at " . date('H:i:s'));
+        $status = "Message sent to channel '{$channel}'.";
+    } else {
+        $status = "Error: broadcast() function does not exist.";
+    }
+}
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Send Message</title>
+</head>
+<body>
+    <h1>Send a WebSocket Message</h1>
+    <?php if (isset($status)): ?>
+        <p><strong><?= htmlspecialchars($status) ?></strong></p>
+    <?php endif; ?>
+    <form action="send.php" method="post">
+        <div>
+            <label for="channel">Channel:</label>
+            <input type="text" id="channel" name="channel" value="news" required>
+        </div>
+        <br>
+        <div>
+            <label for="message">Message:</label>
+            <input type="text" id="message" name="message" value="Hello World!" required>
+        </div>
+        <br>
+        <button type="submit">Send</button>
+    </form>
+</body>
+</html>
+```
 
 ---
 
 ### `broadcast/broadcast.go`
 
-*(Inchangé)*
+```go
+package broadcast
 
----
+import (
+	"C"
+	"unsafe"
+
+	"github.com/dunglas/frankenphp"
+	"github.com/y-l-g/realtime/handler"
+)
+
+//export_php:function broadcast(string $channel, string $message): void
+func broadcast(channel *C.zend_string, message *C.zend_string) {
+	goChannel := frankenphp.GoString(unsafe.Pointer(channel))
+	goMessage := []byte(frankenphp.GoString(unsafe.Pointer(message)))
+	handler.BroadcastToChannel(goChannel, goMessage)
+}
+```
 
 ### `broadcast/go.mod`
 
-*(Inchangé)*
+```go
+module github.com/y-l-g/realtime/broadcast
+
+go 1.25.0
+```
 
 ---
 
 ### `handler/go.mod`
 
-*(Inchangé)*
+```go
+module github.com/y-l-g/realtime/handler
+
+go 1.25.0
+
+require (
+	github.com/caddyserver/caddy/v2 v2.10.0
+	github.com/gorilla/websocket v1.5.3
+	github.com/redis/go-redis/v9 v9.5.3
+)
+
+require (
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+)```
 
 ---
 
@@ -536,3 +738,4 @@ func (h *Hub) Run() {
 		}
 	}
 }
+```
