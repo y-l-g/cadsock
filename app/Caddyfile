@@ -12,7 +12,11 @@
 
 handle /ws {
     abort @not_allowed_origins
-    go_handler 
+    
+    go_handler {
+        driver redis
+        redis_address localhost:6379
+    }
 }
 
 php_server

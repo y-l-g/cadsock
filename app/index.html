@@ -6,25 +6,52 @@
 </head>
 <body>
     <h1>WebSocket Channels</h1>
-    <div id="connection-status" style="color: red;">Disconnected</div>
-    <hr>
+
     <div>
-        <label for="channel">Channel:</label>
-        <input type="text" id="channel" value="news">
-        <button id="subscribe">Subscribe to Channel</button>
+        <strong>Authentication Status:</strong>
+        <span id="auth-status" style="color: red;">Not authenticated</span>
     </div>
+
+    <form id="login-form" style="margin-top: 10px;">
+        <label for="userId">User ID:</label>
+        <input type="text" id="userId" value="user-123">
+        <button type-="submit">Login</button>
+        <button type="button" id="logout">Logout</button>
+    </form>
+
     <hr>
-    <h2>Messages received:</h2>
-    <ul id="messages"></ul>
+    <div id="websocket-ui" style="display: none;">
+        <div id="connection-status" style="color: red;">Disconnected</div>
+        <hr>
+        <div>
+            <label for="channel">Channel:</label>
+            <input type="text" id="channel" value="news">
+            <button id="subscribe">Subscribe to Channel</button>
+        </div>
+        <hr>
+        <h2>Messages received:</h2>
+        <ul id="messages"></ul>
+    </div>
 
     <script>
+        const authStatus = document.getElementById('auth-status');
+        const loginForm = document.getElementById('login-form');
+        const userIdInput = document.getElementById('userId');
+        const logoutBtn = document.getElementById('logout');
+        const websocketUi = document.getElementById('websocket-ui');
+
         const channelInput = document.getElementById('channel');
         const subscribeBtn = document.getElementById('subscribe');
         const messagesList = document.getElementById('messages');
         const statusDiv = document.getElementById('connection-status');
         let socket;
 
-        // Établit la connexion WebSocket une seule fois au chargement de la page.
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
         function connect() {
             socket = new WebSocket("ws://localhost:8080/ws");
 
@@ -41,10 +68,9 @@
             };
 
             socket.onclose = function(event) {
-                console.log('WebSocket connection closed.');
-                statusDiv.textContent = 'Disconnected. Attempting to reconnect in 3 seconds...';
+                console.log('WebSocket connection closed.', event.reason);
+                statusDiv.textContent = `Disconnected. (Code: ${event.code})`;
                 statusDiv.style.color = 'red';
-                setTimeout(connect, 3000);
             };
 
             socket.onerror = function(error) {
@@ -77,9 +103,35 @@
             messagesList.appendChild(message);
         }
 
-        subscribeBtn.addEventListener('click', subscribeToChannel);
+        loginForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const userId = userIdInput.value;
+            if (userId) {
+                document.cookie = `AUTH_TOKEN=${userId};path=/`;
+                window.location.reload();
+            }
+        });
 
-        connect();
+        logoutBtn.addEventListener('click', () => {
+            document.cookie = 'AUTH_TOKEN=;path=/;expires=Thu, 01 Jan 1970 00:00:01 GMT';
+            window.location.reload();
+        });
+
+        subscribeBtn.addEventListener('click', subscribeToChannel);
+        
+        // Check authentication on page load
+        const authToken = getCookie('AUTH_TOKEN');
+        if (authToken) {
+            authStatus.textContent = `Authenticated as ${authToken}`;
+            authStatus.style.color = 'green';
+            websocketUi.style.display = 'block';
+            connect();
+        } else {
+            authStatus.textContent = 'Not authenticated';
+            authStatus.style.color = 'red';
+            websocketUi.style.display = 'none';
+        }
+
     </script>
 </body>
 </html>

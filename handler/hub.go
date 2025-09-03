@@ -1,35 +1,35 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/gorilla/websocket"
 )
 
+var ctx = context.Background()
+
+// --- Client and Message Definitions ---
 const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
 )
-
-type Message struct {
-	Channel string
-	Data    []byte
-}
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
 	Channel string `json:"channel"`
 }
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
+	UserID string
 }
-
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
@@ -83,35 +83,111 @@ func (c *Client) writePump() {
 	}
 }
 
+// --- Broker Abstraction ---
+type Broker interface {
+	Publish(channel string, message []byte) error
+	Subscribe() (<-chan *BrokerMessage, error)
+	Close() error
+}
+type BrokerMessage struct {
+	Channel string
+	Payload []byte
+}
+
+// --- MemoryBroker Implementation ---
+type MemoryBroker struct {
+	broadcast chan *BrokerMessage
+}
+func NewMemoryBroker() *MemoryBroker {
+	return &MemoryBroker{
+		broadcast: make(chan *BrokerMessage, 256),
+	}
+}
+func (b *MemoryBroker) Publish(channel string, message []byte) error {
+	b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}
+	return nil
+}
+func (b *MemoryBroker) Subscribe() (<-chan *BrokerMessage, error) {
+	return b.broadcast, nil
+}
+func (b *MemoryBroker) Close() error {
+	close(b.broadcast)
+	return nil
+}
+
+// --- RedisBroker Implementation ---
+type RedisBroker struct {
+	client *redis.Client
+}
+func NewRedisBroker(address string) *RedisBroker {
+	if address == "" {
+		address = "localhost:6379"
+	}
+	return &RedisBroker{
+		client: redis.NewClient(&redis.Options{Addr: address}),
+	}
+}
+func (b *RedisBroker) Publish(channel string, message []byte) error {
+	return b.client.Publish(ctx, "realtime:"+channel, message).Err()
+}
+func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
+	pubsub := b.client.PSubscribe(ctx, "realtime:*")
+
+	if _, err := pubsub.Receive(ctx); err != nil {
+		log.Printf("[RedisBroker] Failed to receive subscription confirmation: %v", err)
+		return nil, err
+	}
+
+	ch := make(chan *BrokerMessage)
+	go func() {
+		defer close(ch)
+		defer pubsub.Close()
+		redisCh := pubsub.Channel()
+		for msg := range redisCh {
+			ch <- &BrokerMessage{
+				Channel: msg.Channel[len("realtime:"):],
+				Payload: []byte(msg.Payload),
+			}
+		}
+	}()
+	return ch, nil
+}
+func (b *RedisBroker) Close() error {
+	return b.client.Close()
+}
+
+// --- Hub Implementation ---
 type Hub struct {
 	mu          sync.RWMutex
+	broker      Broker
 	channels    map[string]map[*Client]bool
-	clients     map[*Client]map[string]bool // L'index inversé pour un nettoyage efficace
-	broadcast   chan *Message
+	clients     map[*Client]map[string]bool
 	register    chan *Client
 	unregister  chan *Client
 	subscribe   chan subscription
 	unsubscribe chan subscription
 }
-
 type subscription struct {
 	client  *Client
 	channel string
 }
-
-func NewHub() *Hub {
+func NewHub(broker Broker) *Hub {
 	return &Hub{
-		broadcast:   make(chan *Message),
+		broker:      broker,
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		subscribe:   make(chan subscription),
 		unsubscribe: make(chan subscription),
 		channels:    make(map[string]map[*Client]bool),
-		clients:     make(map[*Client]map[string]bool), // Initialisation de la nouvelle map
+		clients:     make(map[*Client]map[string]bool),
 	}
 }
-
 func (h *Hub) Run() {
+	brokerCh, err := h.broker.Subscribe()
+	if err != nil {
+		log.Fatalf("Failed to subscribe to broker: %v", err)
+	}
+
 	for {
 		select {
 		case client := <-h.register:
@@ -143,6 +219,7 @@ func (h *Hub) Run() {
 			h.channels[sub.channel][sub.client] = true
 			h.clients[sub.client][sub.channel] = true
 			h.mu.Unlock()
+			log.Printf("Client %s subscribed to channel %s", sub.client.UserID, sub.channel)
 
 		case sub := <-h.unsubscribe:
 			h.mu.Lock()
@@ -156,14 +233,14 @@ func (h *Hub) Run() {
 				delete(channels, sub.channel)
 			}
 			h.mu.Unlock()
+			log.Printf("Client %s unsubscribed from channel %s", sub.client.UserID, sub.channel)
 
-		case message := <-h.broadcast:
-			// La logique de diffusion reste la même.
+		case msg := <-brokerCh:
 			h.mu.RLock()
-			if clients, ok := h.channels[message.Channel]; ok {
+			if clients, ok := h.channels[msg.Channel]; ok {
 				for client := range clients {
 					select {
-					case client.send <- message.Data:
+					case client.send <- msg.Payload:
 					default:
 						close(client.send)
 						delete(clients, client)
@@ -174,5 +251,3 @@ func (h *Hub) Run() {
 		}
 	}
 }
-
-var PubSubHub = NewHub()
