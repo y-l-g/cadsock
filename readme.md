@@ -1,7 +1,3 @@
-Of course. Here is the complete `readme.md` file, rewritten in English to reflect all the recent architectural improvements and roadmap updates.
-
----
-
 # FrankenPHP Realtime Project
 
 A channel-based WebSocket broadcast service built with a Go Caddy module and a Go PHP extension, featuring pluggable backends for single-node or horizontally-scaled deployments.
