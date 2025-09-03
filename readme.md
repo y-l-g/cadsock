@@ -1,35 +1,37 @@
 # FrankenPHP Realtime Project
 
-A channel-based WebSocket broadcast service built with a Go Caddy module and a Go PHP extension, featuring pluggable backends for single-node or horizontally-scaled deployments.
+Un service de diffusion WebSocket basé sur des canaux, construit avec un module Caddy en Go et une extension PHP en Go. Il dispose de backends interchangeables pour des déploiements sur un seul nœud ou en scaling horizontal.
 
 ## Architecture
 
-The system uses a "Hub and Spoke" architecture for managing connections and messages. It is designed to be both simple for small projects and scalable for production environments.
+Le système utilise une architecture "Hub and Spoke" pour gérer les connexions et les messages. Il est conçu pour être à la fois simple pour les petits projets et scalable pour les environnements de production.
 
--   **Hub (`handler/hub.go`):** The central component. It runs in a single goroutine and manages all state (channels, client subscriptions) for the clients connected to a single server instance.
--   **Client (`handler/hub.go`):** A wrapper for each `*websocket.Conn`. Each client runs two dedicated goroutines (`readPump`, `writePump`) to handle I/O, respecting the one-reader/one-writer concurrency model of `gorilla/websocket`.
--   **Authentication:** The WebSocket connection is secured via a mandatory authentication step. The Go handler performs an internal HTTP request to a PHP endpoint (`/auth.php`) to validate the user's session (e.g., via a cookie). If the PHP script returns a successful response, the connection is upgraded and associated with a User ID.
--   **Broker (`handler/hub.go`):** To support both single-node and multi-node deployments, the Hub uses a pluggable "Broker" for broadcasting messages.
-    -   **Memory Broker:** The default mode. Messages are broadcast in-memory to all clients connected to the *same server instance*. Perfect for simple, single-server applications.
-    -   **Redis Broker:** When enabled, messages are published to a Redis Pub/Sub channel. All server instances subscribe to this channel and deliver messages to their respective local clients, enabling seamless horizontal scaling.
--   **Caddy Module (`handler/handler.go`):** The HTTP entry point. It handles the authentication flow and upgrades authorized HTTP requests to WebSocket connections.
--   **PHP Extension (`broadcast/broadcast.go`):** An FFI bridge that exposes a native `broadcast()` function to PHP. This function sends messages to the configured Broker for distribution.
+-   **Hub (`handler/hub.go`):** Le composant central. Il s'exécute dans une seule goroutine et gère tout l'état (canaux, abonnements des clients) pour les clients connectés à une instance de serveur. Son modèle basé sur les canaux garantit la sécurité des accès concurrents sans nécessiter de verrous complexes.
+-   **Client (`handler/hub.go`):** Un wrapper pour chaque `*websocket.Conn`. Chaque client exécute deux goroutines dédiées (`readPump`, `writePump`) pour gérer les I/O, respectant le modèle de concurrence un-lecteur/un-écrivain de `gorilla/websocket`.
+-   **Authentication:** La connexion WebSocket est sécurisée via une étape d'authentification obligatoire. Le handler Go effectue une requête HTTP interne vers un endpoint PHP (configurable) pour valider la session de l'utilisateur (par exemple, via un cookie). Si le script PHP renvoie une réponse positive, la connexion est mise à niveau et associée à un User ID.
+-   **Broker (`handler/hub.go`):** Pour supporter les déploiements mono-nœud et multi-nœuds, le Hub utilise un "Broker" interchangeable pour la diffusion des messages.
+    -   **Memory Broker:** Le mode par défaut. Les messages sont diffusés en mémoire à tous les clients connectés à la *même instance de serveur*. Parfait pour les applications simples sur un seul serveur.
+    -   **Redis Broker:** Lorsqu'il est activé, les messages sont publiés sur un canal Redis Pub/Sub (via `PSUBSCRIBE` pour supporter les patterns). Toutes les instances de serveur s'abonnent à ce canal et livrent les messages à leurs clients locaux respectifs, permettant un scaling horizontal transparent.
+-   **Caddy Module (`handler/handler.go`):** Le point d'entrée HTTP. Il gère le flux d'authentification et met à niveau les requêtes HTTP autorisées en connexions WebSocket.
+-   **PHP Extension (`broadcast/broadcast.go`):** Un pont FFI qui expose une fonction native `broadcast()` à PHP. Cette fonction envoie les messages au Broker configuré pour distribution.
 
 ## Key Features
 
--   **Secure by Default:** WebSocket connections are rejected unless authenticated via a backend PHP endpoint.
--   **Scalable Architecture:** Start with a simple in-memory setup and switch to a Redis-backed backend for horizontal scaling with a single line of configuration. No code changes required.
--   **Decoupled:** The Go handler delegates all authentication logic to your existing PHP application, allowing you to reuse your session management and user logic.
+-   **Sécurisé par Défaut:** Les connexions WebSocket sont rejetées sauf si elles sont authentifiées via un endpoint backend PHP, dont l'URL est entièrement configurable.
+-   **Architecture Scalable:** Commencez avec une configuration simple en mémoire et passez à un backend Redis pour le scaling horizontal avec une seule ligne de configuration. Aucun changement de code n'est requis.
+-   **Découplé:** Le handler Go délègue toute la logique d'authentification à votre application PHP existante, vous permettant de réutiliser votre gestion de session et votre logique utilisateur.
+-   **Robuste et Résilient:** Le Hub est conçu pour gérer les interruptions de service. En cas d'indisponibilité du broker (ex: redémarrage de Redis), il tentera de se reconnecter automatiquement sans faire planter le serveur principal.
 
-## Roadmap: The Essential Next Steps
+## Roadmap: Next Steps for Production Readiness
 
-Now that the core architecture is secure and scalable, the next priorities are to enrich the API and add more features:
+L'architecture de base étant désormais sécurisée, scalable et robuste, les prochaines priorités visent à enrichir l'API et à garantir la stabilité à long terme.
 
-1.  **Richer PHP API:** The PHP API must be expanded to allow for finer control:
-    *   `broadcastToUser(int|string $userId, string $message)`: To send a private message to a specific user across all server instances.
-    *   `getChannelUsers(string $channel): array`: To get a list of users subscribed to a channel (requires a backend like Redis to store this shared state).
-    *   `disconnectUser(int|string $userId)`: To forcibly close a user's connection.
-2.  **Presence Hooks:** Provide a mechanism to notify the PHP application when a user joins or leaves a channel. This allows for easily building "who's online?" features.
+1.  **Mettre en place une suite de tests automatisés:** Avant d'ajouter de nouvelles fonctionnalités, il est crucial de construire une suite de tests d'intégration (par exemple avec Docker et Pest) pour valider le comportement actuel et prévenir les régressions futures.
+2.  **Enrichir l'API PHP:** L'API PHP doit être étendue pour permettre un contrôle plus fin :
+    *   `broadcastToUser(int|string $userId, string $message)`: Pour envoyer un message privé à un utilisateur spécifique sur toutes les instances de serveur.
+    *   `getChannelUsers(string $channel): array`: Pour obtenir la liste des utilisateurs abonnés à un canal (nécessite un backend comme Redis pour stocker cet état partagé).
+    *   `disconnectUser(int|string $userId)`: Pour fermer de force la connexion d'un utilisateur.
+3.  **Ajouter des "Presence Hooks":** Fournir un mécanisme pour notifier l'application PHP lorsqu'un utilisateur rejoint ou quitte un canal. Cela permet de construire facilement des fonctionnalités de type "qui est en ligne ?".
 
 ## Project Structure
 
@@ -37,7 +39,7 @@ Now that the core architecture is secure and scalable, the next priorities are t
 realtime/
 ├── app/
 │   ├── Caddyfile
-│   ├── auth.php      # New authentication endpoint
+│   ├── auth.php
 │   ├── index.php
 │   └── send.php
 ├── broadcast/
@@ -54,18 +56,18 @@ realtime/
 ### PHP API
 
 -   `broadcast(string $channel, string $message): void`
-    -   Sends `$message` to all clients currently subscribed to `$channel` via the configured broker.
+    -   Envoie `$message` à tous les clients actuellement abonnés à `$channel` via le broker configuré.
 
 ### Client-Side Protocol (JSON)
 
--   **Subscribe to a channel:**
+-   **S'abonner à un canal:**
     ```json
     {
         "action": "subscribe",
         "channel": "channel_name"
     }
     ```
--   **Unsubscribe from a channel:**
+-   **Se désabonner d'un canal:**
     ```json
     {
         "action": "unsubscribe",
@@ -75,64 +77,35 @@ realtime/
 
 ## Build Procedure
 
-**(Prerequisites: Go (>= 1.25), PHP development headers (`php-config`), PHP source code.)**
+**(Prérequis: Go (>= 1.25), en-têtes de développement PHP (`php-config`), code source de PHP.)**
 
-The build procedure remains the same. After any changes in the `handler` or `broadcast` Go modules, you must recompile the FrankenPHP binary.
-
-**1. Generate Extension Stubs (if `broadcast.go` changes)**
-```bash
-# From project root, adjust PHP source path
-GEN_STUB_SCRIPT=../php-8.4.11/build/gen_stub.php frankenphp extension-init broadcast/broadcast.go
-cp broadcast/go.mod broadcast/build/go.mod
-```
-
-**2. Compile Custom Binary**
-```bash
-# From project root
-CGO_ENABLED=1 \
-XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s'" \
-CGO_CFLAGS=$(php-config --includes) \
-CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
-xcaddy build \
-    --output app/frankenphp \
-    --with github.com/y-l-g/realtime/handler=./handler \
-    --with github.com/y-l-g/realtime/broadcast/build=./broadcast/build \
-    --with github.com/dunglas/frankenphp/caddy \
-    --with github.com/dunglas/caddy-cbrotli
-```
-
-**3. Run Server**
-```bash
-cd app
-./frankenphp run
-```
+La procédure de build reste la même. Après tout changement dans les modules Go `handler` ou `broadcast`, vous devez recompiler le binaire FrankenPHP.
 
 ## Configuration
 
-The application is configured via the `app/Caddyfile`.
+L'application est configurée via le `app/Caddyfile`. Le handler `go_handler` accepte plusieurs options dans son bloc de configuration.
 
-### Broker Configuration
+| Directive | Description | Défaut |
+|---|---|---|
+| `driver` | Le backend de diffusion à utiliser (`memory` ou `redis`). | `memory` |
+| `redis_address` | L'adresse du serveur Redis (utilisée si `driver` est `redis`). | `localhost:6379` |
+| `auth_endpoint` | L'URL interne complète pour la validation de l'authentification. | `http://localhost:8080/auth.php` |
 
-The WebSocket handler can be configured to use different broadcasting backends.
+### Exemples de Configuration
 
--   **Default (In-Memory):** For single-server deployments. No specific configuration is needed.
+-   **Défaut (En-Mémoire):** Pour les déploiements sur un seul serveur. Un bloc vide suffit pour utiliser les valeurs par défaut.
     ```caddyfile
     handle /ws {
-        go_handler
+        go_handler {}
     }
     ```
 
--   **Redis:** For multi-server, horizontally-scaled deployments.
+-   **Redis:** Pour les déploiements multi-serveurs en scaling horizontal.
     ```caddyfile
     handle /ws {
         go_handler {
             driver redis
-            redis_address localhost:6379
+            redis_address redis.internal:6379
+            auth_endpoint http://localhost:8080/api/auth
         }
     }
-    ```
-
-### Environment Variables
-
--   `SERVER_ADDRESS`: The address and port for Caddy to listen on. (Default: `:8080`)
--   `ALLOWED_ORIGINS`: A space-separated list of WebSocket origins to allow. (Default: `http://localhost:8080`)

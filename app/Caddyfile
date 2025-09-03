@@ -14,9 +14,16 @@ handle /ws {
     abort @not_allowed_origins
     
     go_handler {
+        # By default, the in-memory driver is used.
+        # To enable Redis for horizontal scaling, uncomment the following lines.
         driver redis
         redis_address localhost:6379
+
+        # (Optional) Override the default internal authentication endpoint.
+        # The default is "http://localhost:8080/auth.php".
+        # auth_endpoint http://localhost:8080/auth.php
     }
 }
 
+# The PHP server handles the web UI and the internal /auth.php endpoint
 php_server

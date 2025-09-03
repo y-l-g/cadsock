@@ -4,32 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
 
 var ctx = context.Background()
 
-// --- Client and Message Definitions ---
 const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
 )
+
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
 	Channel string `json:"channel"`
 }
+
 type Client struct {
 	hub    *Hub
 	conn   *websocket.Conn
 	send   chan []byte
 	UserID string
 }
+
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
@@ -59,6 +60,7 @@ func (c *Client) readPump() {
 		}
 	}
 }
+
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -83,42 +85,45 @@ func (c *Client) writePump() {
 	}
 }
 
-// --- Broker Abstraction ---
 type Broker interface {
 	Publish(channel string, message []byte) error
 	Subscribe() (<-chan *BrokerMessage, error)
 	Close() error
 }
+
 type BrokerMessage struct {
 	Channel string
 	Payload []byte
 }
 
-// --- MemoryBroker Implementation ---
 type MemoryBroker struct {
 	broadcast chan *BrokerMessage
 }
+
 func NewMemoryBroker() *MemoryBroker {
 	return &MemoryBroker{
 		broadcast: make(chan *BrokerMessage, 256),
 	}
 }
+
 func (b *MemoryBroker) Publish(channel string, message []byte) error {
 	b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}
 	return nil
 }
+
 func (b *MemoryBroker) Subscribe() (<-chan *BrokerMessage, error) {
 	return b.broadcast, nil
 }
+
 func (b *MemoryBroker) Close() error {
 	close(b.broadcast)
 	return nil
 }
 
-// --- RedisBroker Implementation ---
 type RedisBroker struct {
 	client *redis.Client
 }
+
 func NewRedisBroker(address string) *RedisBroker {
 	if address == "" {
 		address = "localhost:6379"
@@ -127,12 +132,13 @@ func NewRedisBroker(address string) *RedisBroker {
 		client: redis.NewClient(&redis.Options{Addr: address}),
 	}
 }
+
 func (b *RedisBroker) Publish(channel string, message []byte) error {
 	return b.client.Publish(ctx, "realtime:"+channel, message).Err()
 }
+
 func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
 	pubsub := b.client.PSubscribe(ctx, "realtime:*")
-
 	if _, err := pubsub.Receive(ctx); err != nil {
 		log.Printf("[RedisBroker] Failed to receive subscription confirmation: %v", err)
 		return nil, err
@@ -152,13 +158,12 @@ func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
 	}()
 	return ch, nil
 }
+
 func (b *RedisBroker) Close() error {
 	return b.client.Close()
 }
 
-// --- Hub Implementation ---
 type Hub struct {
-	mu          sync.RWMutex
 	broker      Broker
 	channels    map[string]map[*Client]bool
 	clients     map[*Client]map[string]bool
@@ -167,10 +172,12 @@ type Hub struct {
 	subscribe   chan subscription
 	unsubscribe chan subscription
 }
+
 type subscription struct {
 	client  *Client
 	channel string
 }
+
 func NewHub(broker Broker) *Hub {
 	return &Hub{
 		broker:      broker,
@@ -182,21 +189,27 @@ func NewHub(broker Broker) *Hub {
 		clients:     make(map[*Client]map[string]bool),
 	}
 }
+
 func (h *Hub) Run() {
-	brokerCh, err := h.broker.Subscribe()
-	if err != nil {
-		log.Fatalf("Failed to subscribe to broker: %v", err)
+	var brokerCh <-chan *BrokerMessage
+	var err error
+
+	for {
+		brokerCh, err = h.broker.Subscribe()
+		if err == nil {
+			log.Println("Successfully subscribed to broker")
+			break
+		}
+		log.Printf("Failed to subscribe to broker, retrying in 5 seconds: %v", err)
+		time.Sleep(5 * time.Second)
 	}
 
 	for {
 		select {
 		case client := <-h.register:
-			h.mu.Lock()
 			h.clients[client] = make(map[string]bool)
-			h.mu.Unlock()
 
 		case client := <-h.unregister:
-			h.mu.Lock()
 			if channels, ok := h.clients[client]; ok {
 				for channel := range channels {
 					if clientsInChannel, ok := h.channels[channel]; ok {
@@ -208,21 +221,17 @@ func (h *Hub) Run() {
 				}
 				delete(h.clients, client)
 			}
-			h.mu.Unlock()
 			close(client.send)
 
 		case sub := <-h.subscribe:
-			h.mu.Lock()
 			if _, ok := h.channels[sub.channel]; !ok {
 				h.channels[sub.channel] = make(map[*Client]bool)
 			}
 			h.channels[sub.channel][sub.client] = true
 			h.clients[sub.client][sub.channel] = true
-			h.mu.Unlock()
 			log.Printf("Client %s subscribed to channel %s", sub.client.UserID, sub.channel)
 
 		case sub := <-h.unsubscribe:
-			h.mu.Lock()
 			if clients, ok := h.channels[sub.channel]; ok {
 				delete(clients, sub.client)
 				if len(clients) == 0 {
@@ -232,11 +241,9 @@ func (h *Hub) Run() {
 			if channels, ok := h.clients[sub.client]; ok {
 				delete(channels, sub.channel)
 			}
-			h.mu.Unlock()
 			log.Printf("Client %s unsubscribed from channel %s", sub.client.UserID, sub.channel)
 
 		case msg := <-brokerCh:
-			h.mu.RLock()
 			if clients, ok := h.channels[msg.Channel]; ok {
 				for client := range clients {
 					select {
@@ -247,7 +254,6 @@ func (h *Hub) Run() {
 					}
 				}
 			}
-			h.mu.RUnlock()
 		}
 	}
 }

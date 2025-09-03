@@ -31,6 +31,7 @@ func init() {
 type GoHandler struct {
 	Driver       string `json:"driver,omitempty"`
 	RedisAddress string `json:"redis_address,omitempty"`
+	AuthEndpoint string `json:"auth_endpoint,omitempty"`
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -57,21 +58,34 @@ func (h *GoHandler) Provision(ctx caddy.Context) error {
 }
 
 func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	h.Driver = "memory" // Default driver
+	h.Driver = "memory"
+	h.AuthEndpoint = "http://localhost:8080/auth.php"
+
 	for d.Next() {
-		for d.NextBlock(0) {
-			switch d.Val() {
-			case "driver":
-				if !d.NextArg() {
-					return d.ArgErr()
+		// This handles the case of `go_handler` without a block.
+		if !d.NextArg() {
+			for d.NextBlock(0) {
+				switch d.Val() {
+				case "driver":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					h.Driver = d.Val()
+				case "redis_address":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					h.RedisAddress = d.Val()
+				case "auth_endpoint":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					h.AuthEndpoint = d.Val()
 				}
-				h.Driver = d.Val()
-			case "redis_address":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				h.RedisAddress = d.Val()
 			}
+		} else {
+			// To prevent `go_handler some_arg`
+			return d.ArgErr()
 		}
 	}
 	return nil
@@ -84,7 +98,7 @@ func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 }
 
 func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	authReq, err := http.NewRequest(http.MethodGet, "http://localhost:8080/auth.php", nil)
+	authReq, err := http.NewRequest(http.MethodGet, h.AuthEndpoint, nil)
 	if err != nil {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return err
