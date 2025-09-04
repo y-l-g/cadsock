@@ -44,7 +44,6 @@ The module does not implement authentication logic itself. Instead, it acts as a
 
 You must compile a custom Caddy binary that includes this module. The recommended way is to use `xcaddy`.
 
-Assuming your module is located at a public Git repository:
 ```console
 xcaddy build \
     --with github.com/y-l-g/cadsock
