@@ -171,6 +171,7 @@ type Hub struct {
 	unregister  chan *Client
 	subscribe   chan subscription
 	unsubscribe chan subscription
+	shutdown    chan struct{}
 }
 
 type subscription struct {
@@ -187,7 +188,12 @@ func NewHub(broker Broker) *Hub {
 		unsubscribe: make(chan subscription),
 		channels:    make(map[string]map[*Client]bool),
 		clients:     make(map[*Client]map[string]bool),
+		shutdown:    make(chan struct{}),
 	}
+}
+
+func (h *Hub) Shutdown() {
+	close(h.shutdown)
 }
 
 func (h *Hub) Run() {
@@ -254,6 +260,15 @@ func (h *Hub) Run() {
 					}
 				}
 			}
+		
+		case <-h.shutdown:
+			log.Println("Hub received shutdown signal. Closing client connections.")
+			for client := range h.clients {
+				close(client.send)
+			}
+			h.broker.Close()
+			log.Println("Hub shutdown complete.")
+			return
 		}
 	}
 }

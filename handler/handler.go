@@ -30,8 +30,6 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-var PubSubHub *Hub
-
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
@@ -41,6 +39,7 @@ type GoHandler struct {
 	Driver       string `json:"driver,omitempty"`
 	RedisAddress string `json:"redis_address,omitempty"`
 	AuthEndpoint string `json:"auth_endpoint,omitempty"`
+	hub          *Hub
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -61,8 +60,15 @@ func (h *GoHandler) Provision(ctx caddy.Context) error {
 		broker = NewMemoryBroker()
 	}
 
-	PubSubHub = NewHub(broker)
-	go PubSubHub.Run()
+	h.hub = NewHub(broker)
+	go h.hub.Run()
+
+	return nil
+}
+
+func (h *GoHandler) Cleanup() error {
+	log.Println("Shutting down hub...")
+	h.hub.Shutdown()
 	return nil
 }
 
@@ -105,6 +111,50 @@ func parseGoHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 }
 
 func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	switch r.URL.Path {
+	case "/ws":
+		return h.serveWs(w, r)
+	case "/internal/broadcast":
+		return h.serveBroadcast(w, r)
+	default:
+		return next.ServeHTTP(w, r)
+	}
+}
+
+func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return nil
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return err
+	}
+	channel := r.FormValue("channel")
+	message := r.FormValue("message")
+
+	if channel == "" || message == "" {
+		http.Error(w, "Missing channel or message", http.StatusBadRequest)
+		return nil
+	}
+
+	if h.hub == nil || h.hub.broker == nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return errors.New("hub or broker not initialized")
+	}
+
+	err := h.hub.broker.Publish(channel, []byte(message))
+	if err != nil {
+		log.Printf("error publishing message: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return err
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	return nil
+}
+
+func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
 	authReq, err := http.NewRequest(http.MethodGet, h.AuthEndpoint, nil)
 	if err != nil {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -140,8 +190,8 @@ func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		return err
 	}
 
-	client := &Client{hub: PubSubHub, conn: conn, send: make(chan []byte, 256), UserID: authResponse.ID}
-	PubSubHub.register <- client
+	client := &Client{hub: h.hub, conn: conn, send: make(chan []byte, 256), UserID: authResponse.ID}
+	h.hub.register <- client
 
 	go client.writePump()
 	client.readPump()
@@ -149,20 +199,10 @@ func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	return nil
 }
 
-func BroadcastToChannel(channel string, msg []byte) {
-	if PubSubHub == nil || PubSubHub.broker == nil {
-		log.Println("error: Hub or broker not initialized")
-		return
-	}
-	err := PubSubHub.broker.Publish(channel, msg)
-	if err != nil {
-		log.Printf("error publishing message: %v", err)
-	}
-}
-
 var (
 	_ caddy.Module                = (*GoHandler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*GoHandler)(nil)
 	_ caddy.Provisioner           = (*GoHandler)(nil)
+	_ caddy.CleanerUpper          = (*GoHandler)(nil)
 	_ caddyfile.Unmarshaler       = (*GoHandler)(nil)
 )

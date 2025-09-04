@@ -6,24 +6,21 @@
 
 {$SERVER_ADDRESS::8080}
 
-@not_allowed_origins {
+@is_bad_origin {
+    header Origin *
     not header Origin {$ALLOWED_ORIGINS:http://localhost:8080}
 }
 
-handle /ws {
-    abort @not_allowed_origins
+@go_paths path /ws /internal/broadcast
+
+handle @go_paths {
+    abort @is_bad_origin
     
     go_handler {
-        # By default, the in-memory driver is used.
-        # To enable Redis for horizontal scaling, uncomment the following lines.
         driver redis
         redis_address localhost:6379
-
-        # (Optional) Override the default internal authentication endpoint.
-        # The default is "http://localhost:8080/auth.php".
-        # auth_endpoint http://localhost:8080/auth.php
+        # auth_endpoint http://localhost:8080/api/auth
     }
 }
 
-# The PHP server handles the web UI and the internal /auth.php endpoint
 php_server
