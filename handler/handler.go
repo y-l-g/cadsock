@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -17,7 +18,15 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
 	},
 }
 
@@ -62,7 +71,6 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	h.AuthEndpoint = "http://localhost:8080/auth.php"
 
 	for d.Next() {
-		// This handles the case of `go_handler` without a block.
 		if !d.NextArg() {
 			for d.NextBlock(0) {
 				switch d.Val() {
@@ -84,7 +92,6 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 			}
 		} else {
-			// To prevent `go_handler some_arg`
 			return d.ArgErr()
 		}
 	}

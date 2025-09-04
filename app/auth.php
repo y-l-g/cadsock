@@ -1,15 +1,28 @@
 <?php
+require_once __DIR__ . '/vendor/autoload.php';
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
 
 header('Content-Type: application/json');
 
-// This is a dummy authentication logic.
-// In a real application, you would validate a session cookie or a JWT token
-// against your database or session store.
-if (isset($_COOKIE['AUTH_TOKEN']) && str_starts_with($_COOKIE['AUTH_TOKEN'], 'user-')) {
-    http_response_code(200);
-    echo json_encode(['id' => $_COOKIE['AUTH_TOKEN']]);
+$token = $_COOKIE['AUTH_TOKEN'] ?? null;
+
+if (!$token) {
+    http_response_code(401);
+    echo json_encode(['error' => 'Missing authentication token']);
     exit;
 }
 
-http_response_code(401);
-echo json_encode(['error' => 'Unauthorized']);
+$secretKey = 'your-super-secret-key-that-no-one-knows';
+
+try {
+    $decoded = JWT::decode($token, new Key($secretKey, 'HS256'));
+    $userId = $decoded->sub;
+
+    http_response_code(200);
+    echo json_encode(['id' => $userId]);
+
+} catch (Exception $e) {
+    http_response_code(401);
+    echo json_encode(['error' => 'Unauthorized: ' . $e->getMessage()]);
+}
