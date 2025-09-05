@@ -54,7 +54,8 @@ xcaddy build \
 
 # Or from the project's local directory
 xcaddy build \
-    --with github.com/y-l-g/cadsock=.```
+    --with github.com/y-l-g/cadsock=.
+```
 
 ### 2. Configure Your Caddyfile
 
