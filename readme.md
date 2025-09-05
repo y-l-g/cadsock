@@ -118,7 +118,8 @@ Clients send JSON messages to the `/ws` endpoint to manage subscriptions.
 -   **Subscribe:**
     ```json
     { "action": "subscribe", "channel": "channel_name" }
-    ```-   **Unsubscribe:**
+    ```
+    -   **Unsubscribe:**
     ```json
     { "action": "unsubscribe", "channel": "channel_name" }
     ```
