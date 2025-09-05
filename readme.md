@@ -114,3 +114,26 @@ Your backend application is responsible for implementing the logic for the `auth
 ## Example Application
 
 A complete example of a backend application using **FrankenPHP** is provided in the `examples/frankenphp-app` directory. It includes a working `Caddyfile` and all necessary PHP scripts to demonstrate the authentication and broadcast flows.
+
+You must compile a custom Caddy binary that includes this module and frankenphp. You can use this command from the root of the repository :
+
+```console
+CGO_ENABLED=1 \
+XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s' -tags=nobadger,nomysql,nopgx,nowatcher" \
+CGO_CFLAGS=$(php-config --includes) \
+CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
+xcaddy build \
+    --output examples/php-app/frankenphp \
+    --with github.com/y-l-g/cadsock=. \
+    --with github.com/dunglas/frankenphp/caddy \
+    --with github.com/dunglas/caddy-cbrotli
+```
+
+Then
+
+```console
+cd examples/php-app
+./frankenphp run
+```
+
+Then visit localhost:8080 and localhost:8080/send.php
