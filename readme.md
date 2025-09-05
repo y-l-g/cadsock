@@ -2,41 +2,44 @@
 
 A high-performance, language-agnostic WebSocket module for the Caddy web server. It provides a real-time messaging hub that can be integrated with any backend application capable of making HTTP requests.
 
-The module is built in Go and leverages Caddy's powerful architecture to offer a scalable and efficient solution for adding real-time features to your web applications.
+The module is built in Go and leverages Caddy's powerful, managed lifecycle to offer a scalable and efficient solution for adding real-time features to your web applications.
 
-**Project Status:** This is a proof-of-concept and has not been battle-tested in a large-scale production environment. It serves as a solid foundation but lacks critical components like an automated test suite. See the "Known Limitations" section before considering production use.
+## Core Concepts
 
-## Features
+The module operates by exposing two primary endpoints, both managed by the `go_handler` directive:
 
--   **Language-Agnostic:** Your backend can be written in PHP, Python, Node.js, Ruby, or any other language. Broadcasting is done via a simple HTTP POST request.
--   **Scalable Architecture:** Start with a simple in-memory broker for single-node deployments and switch to a Redis Pub/Sub broker for horizontal scaling with a single line of configuration.
--   **Decoupled Authentication:** The module delegates authentication to your existing backend via a configurable webhook, allowing you to reuse your application's session and user logic. The recommended flow is JWT-based.
--   **Efficient & Performant:** Built in Go to handle a large number of concurrent WebSocket connections with a low memory footprint.
--   **Graceful Shutdown:** Integrates with Caddy's lifecycle to ensure clean shutdowns, properly closing client connections and broker resources.
-
-## How It Works
-
-The module exposes two primary endpoints managed by the same handler:
-
-1.  `/ws`: The WebSocket endpoint where clients connect.
-2.  `/internal/broadcast`: The HTTP endpoint your backend calls to send messages.
+1.  `/ws`: The WebSocket endpoint where clients establish a persistent connection.
+2.  `/internal/broadcast`: A secure, internal HTTP endpoint your backend calls to publish messages to connected clients.
 
 ### The Authentication Flow
 
-The module does not implement authentication logic itself. Instead, it acts as a gatekeeper that queries your backend.
+`cadsock` delegates authentication entirely to your existing backend application, acting as a secure gatekeeper. This allows you to reuse your application's session and user validation logic without modification.
 
 1.  A client attempts to open a WebSocket connection to `/ws`.
-2.  The module makes an internal HTTP request to the `auth_endpoint` you configured, forwarding the client's cookies.
-3.  Your backend application at `auth_endpoint` receives this request. It's responsible for validating the user's session (e.g., by decoding a JWT from a cookie).
-4.  If the user is valid, your backend must respond with `200 OK` and a JSON body containing a user identifier, like `{"id": "user-123"}`. Any other response is treated as an authentication failure.
-5.  If authentication succeeds, the module upgrades the connection to a WebSocket. Otherwise, the connection is rejected.
+2.  The module intercepts this request and makes an internal, server-to-server HTTP `GET` request to the configured `auth_endpoint`. Crucially, **all headers from the original client request are forwarded**, including `Cookie`, `Authorization`, `User-Agent`, etc.
+3.  Your backend application at the `auth_endpoint` receives this request. It is responsible for validating the user's credentials using the provided headers (e.g., by decoding a JWT from a bearer token or validating a session cookie).
+4.  If the user is valid, your backend **must** respond with a `200 OK` status and a JSON body containing a unique user identifier, such as `{"id": "user-123"}`.
+5.  Any other response status or a malformed JSON body is treated as an authentication failure. If authentication succeeds, `cadsock` upgrades the client's connection to a WebSocket; otherwise, the connection is rejected with an HTTP error.
 
 ### The Broadcast Flow
 
-1.  An event occurs in your backend application (e.g., a new order is placed, a message is posted).
-2.  Your backend sends a `POST` request to the module's `/internal/broadcast` endpoint.
-3.  The module receives this request and publishes the message to the configured broker (Memory or Redis).
-4.  The broker distributes the message to all connected and subscribed clients across all server instances.
+Broadcasting is designed for server-to-server communication and is secured by a shared secret key.
+
+1.  An event occurs in your backend application (e.g., a new order is placed, a user posts a comment).
+2.  Your backend sends an HTTP `POST` request to the module's `/internal/broadcast` endpoint.
+3.  This request **must** include a secret token in the `X-Broadcast-Secret` header to authenticate the broadcast request itself.
+4.  The body of the POST request must contain two form fields: `channel` (the topic to publish to) and `message` (the payload, which must be a valid JSON value).
+5.  `cadsock` validates the secret. If valid, it publishes the message to the configured broker (In-Memory or Redis).
+6.  The broker distributes the message to all clients currently subscribed to that channel across all server instances.
+
+## Features
+
+-   **Language-Agnostic:** Your backend can be written in PHP, Python, Node.js, Ruby, or any other language capable of handling and making HTTP requests.
+-   **Flexible Authentication:** By forwarding all client headers to your backend, the module supports virtually any authentication scheme (JWT Bearer tokens, session cookies, API keys, etc.).
+-   **Secure by Default:** The critical `/internal/broadcast` endpoint is protected by a mandatory shared secret, preventing unauthorized message publishing.
+-   **Scalable Architecture:** Start with a simple in-memory broker for single-node deployments and switch to a Redis Pub/Sub broker for horizontal scaling with a single line of configuration.
+-   **Robust Lifecycle Management:** Integrates with Caddy's context for graceful shutdowns, ensuring clean closure of client connections and broker resources.
+-   **Structured Communication Protocol:** All server-to-client communication uses a clear JSON protocol, providing clients with explicit confirmations for actions and properly encapsulated messages.
 
 ## Usage Guide
 
@@ -45,56 +48,70 @@ The module does not implement authentication logic itself. Instead, it acts as a
 You must compile a custom Caddy binary that includes this module. The recommended way is to use `xcaddy`.
 
 ```console
+# From anywhere
 xcaddy build \
     --with github.com/y-l-g/cadsock
-```
-Or, from a local directory:
-```console
+
+# Or from the project's local directory
 xcaddy build \
-    --with github.com/y-l-g/cadsock=./
-```
+    --with github.com/y-l-g/cadsock=.```
 
 ### 2. Configure Your Caddyfile
 
 Add a `handle` block to your `Caddyfile` to configure and activate the module.
 
 ```caddyfile
-@go_paths path /ws /internal/broadcast
+@cadsock_paths path /ws /internal/broadcast
 
-handle @go_paths {
+handle @cadsock_paths {
     go_handler {
-        # driver redis
+        # The shared secret for securing the broadcast endpoint.
+        # This is mandatory for production.
+        broadcast_secret "your-very-strong-and-secret-key"
+
+        # The internal URL for the authentication webhook.
+        # All headers from the client will be forwarded here.
+        auth_endpoint http://localhost:8080/auth.php
+
+        # (Optional) The broadcast backend driver ("memory" or "redis").
+        driver memory
+
+        # (Optional) The address of the Redis server if driver is "redis".
         # redis_address localhost:6379
-        # auth_endpoint http://localhost:8080/auth.php
     }
 }
 ```
 
 #### Configuration Directives
 
-| Directive     | Description                                     | Default Value                    |
-|---------------|-------------------------------------------------|----------------------------------|
-| `driver`        | The broadcast backend (`memory` or `redis`).    | `memory`                         |
-| `redis_address` | The address of the Redis server.                | `localhost:6379`                 |
-| `auth_endpoint` | The internal URL for the authentication webhook. | `http://localhost:8080/auth.php` |
+| Directive          | Description                                                              | Default Value                    |
+| ------------------ | ------------------------------------------------------------------------ | -------------------------------- |
+| `broadcast_secret` | **(Required)** The shared secret sent in the `X-Broadcast-Secret` header. | (none)                           |
+| `auth_endpoint`    | The internal URL for the authentication webhook.                         | `http://localhost:8080/auth.php` |
+| `driver`           | The broadcast backend (`memory` or `redis`).                             | `memory`                         |
+| `redis_address`    | The address of the Redis server.                                         | `localhost:6379`                 |
 
 ### 3. Implement Backend Endpoints
 
-Your backend application is responsible for implementing the logic for the `auth_endpoint` and for sending broadcast requests.
+Your application is responsible for two key pieces of logic:
 
--   **Authentication Endpoint:** Must validate credentials and return `{"id": "..."}` on success.
--   **Broadcasting:** Must send `POST` requests to `/internal/broadcast` with `channel` and `message` form fields.
+1.  **Authentication Endpoint (`auth_endpoint`)**
+    -   Must inspect incoming headers (e.g., `Cookie`, `Authorization`) to validate the user.
+    -   On success, must respond with `200 OK` and a JSON body: `{"id": "some-user-id"}`.
+    -   On failure, must respond with a non-200 status code.
 
-## API Reference
+2.  **Broadcasting Logic**
+    -   To send a message, make a `POST` request to `/internal/broadcast`.
+    -   The request must include the header: `X-Broadcast-Secret: your-very-strong-and-secret-key`.
+    -   The request body must be `application/x-www-form-urlencoded` with two fields:
+        -   `channel`: The target channel name (e.g., `orders`).
+        -   `message`: The message payload, **which must be a valid JSON value** (e.g., a JSON-encoded string `"hello"`, a number `123`, or an object `{"foo":"bar"}`).
 
-### Module Endpoints
+## Communication Protocol
 
--   `GET /ws`: WebSocket handshake endpoint.
--   `POST /internal/broadcast`: Broadcast endpoint.
-    -   `channel` (form field): The channel to publish to.
-    -   `message` (form field): The message payload.
+### Client-to-Server (JSON)
 
-### Client-Side Protocol (JSON)
+Clients send JSON messages to the `/ws` endpoint to manage subscriptions.
 
 -   **Subscribe:**
     ```json
@@ -105,17 +122,36 @@ Your backend application is responsible for implementing the logic for the `auth
     { "action": "unsubscribe", "channel": "channel_name" }
     ```
 
-## Known Limitations
+### Server-to-Client (JSON)
 
--   **Insecure Broadcast Endpoint:** The `/internal/broadcast` endpoint is not secured by the module itself. It is your responsibility to protect it using a firewall, network policies (e.g., binding it to a localhost-only port), or a Caddy directive that requires a secret token.
--   **No Presence Management:** The module is stateless and does not track which users are in which channels. Building features like "who's online" requires an external state store managed by your application.
--   **No Automated Tests:** The lack of a test suite is the biggest risk. Contributions in this area are highly welcome.
+The server sends structured JSON messages to clients to confirm actions or deliver broadcasts. All messages from the server have a `type` field.
+
+-   **Subscription Confirmation:**
+    ```json
+    { "type": "subscribed", "channel": "channel_name" }
+    ```
+-   **Broadcast Message:**
+    ```json
+    {
+      "type": "message",
+      "channel": "channel_name",
+      "payload": "your-json-encoded-message"
+    }
+    ```
+-   **Error Message:** (Future implementation)
+    ```json
+    { "type": "error", "error": "a description of the error" }
+    ```
 
 ## Example Application
 
 A complete example of a backend application using **FrankenPHP** is provided in the `examples/frankenphp-app` directory. It includes a working `Caddyfile` and all necessary PHP scripts to demonstrate the authentication and broadcast flows.
 
-You must compile a custom Caddy binary that includes this module and frankenphp. You can use this command from the root of the repository :
+The example has been updated to follow best practices:
+-   It reads secrets from environment variables rather than hardcoding them.
+-   It includes a `send_cli.php` script demonstrating the primary server-to-server broadcast use case.
+
+To run the example, first build the custom Caddy binary. 
 
 ```console
 CGO_ENABLED=1 \
@@ -129,11 +165,17 @@ xcaddy build \
     --with github.com/dunglas/caddy-cbrotli
 ```
 
-Then
+Then, from the project root:
 
 ```console
-cd examples/php-app
-./frankenphp run
+JWT_SECRET_KEY='your-super-secret-key' \
+BROADCAST_SECRET_KEY='your-very-strong-and-secret-key' \
+./examples/frankenphp-app/frankenphp run --config examples/frankenphp-app/Caddyfile
 ```
-
 Then visit localhost:8080 and localhost:8080/send.php
+
+## Known Limitations & Future Work
+
+-   **No Automated Tests:** This is the most significant risk. The module lacks unit and integration tests, making contributions and maintenance difficult. This is the highest priority for moving beyond a PoC status.
+-   **No Presence Management:** The module is stateless and does not track which users are in which channels. Building features like "who's online" requires an external state store managed by your application.
+-   **Basic Protocol:** The client-server protocol is minimal. It could be extended to include acknowledgements, request IDs, and more detailed error reporting.

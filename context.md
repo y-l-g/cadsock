@@ -17,7 +17,8 @@ cadsock/
         ├── index.php
         ├── login.php
         ├── logout.php
-        └── send.php
+        ├── send.php
+        └── send_cli.php
 ```
 
 ---
@@ -32,25 +33,27 @@ go 1.25.0
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/redis/go-redis/v9 v9.5.3
+	go.uber.org/zap v1.27.0
 )
 
 require (
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-)
-```
+	go.uber.org/multierr v1.10.0 // indirect
+)```
 
 ---
 
 ### `cadsock/handler.go`
 
 ```go
-package main
+package cadsock
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"net/url"
 
@@ -59,6 +62,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 var upgrader = websocket.Upgrader{
@@ -83,10 +87,15 @@ func init() {
 }
 
 type GoHandler struct {
-	Driver       string `json:"driver,omitempty"`
-	RedisAddress string `json:"redis_address,omitempty"`
-	AuthEndpoint string `json:"auth_endpoint,omitempty"`
-	hub          *Hub
+	Driver          string `json:"driver,omitempty"`
+	RedisAddress    string `json:"redis_address,omitempty"`
+	AuthEndpoint    string `json:"auth_endpoint,omitempty"`
+	BroadcastSecret string `json:"broadcast_secret,omitempty"`
+	hub             *Hub
+	log             *zap.Logger
+	httpClient      *http.Client
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -97,24 +106,29 @@ func (GoHandler) CaddyModule() caddy.ModuleInfo {
 }
 
 func (h *GoHandler) Provision(ctx caddy.Context) error {
+	h.log = ctx.Logger(h)
+	h.httpClient = &http.Client{}
+	h.ctx, h.cancel = context.WithCancel(ctx)
+
 	var broker Broker
 	switch h.Driver {
 	case "redis":
-		log.Println("Using Redis broker")
+		h.log.Info("using redis broker", zap.String("address", h.RedisAddress))
 		broker = NewRedisBroker(h.RedisAddress)
 	default:
-		log.Println("Using in-memory broker")
+		h.log.Info("using in-memory broker")
 		broker = NewMemoryBroker()
 	}
 
-	h.hub = NewHub(broker)
+	h.hub = NewHub(broker, h.log.Named("hub"), h.ctx)
 	go h.hub.Run()
 
 	return nil
 }
 
 func (h *GoHandler) Cleanup() error {
-	log.Println("Shutting down hub...")
+	h.log.Info("cleaning up handler resources")
+	h.cancel()
 	h.hub.Shutdown()
 	return nil
 }
@@ -124,18 +138,31 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	h.AuthEndpoint = "http://localhost:8080/auth.php"
 
 	for d.Next() {
-		if d.NextArg() { return d.ArgErr() }
+		if d.NextArg() {
+			return d.ArgErr()
+		}
 		for d.NextBlock(0) {
 			switch d.Val() {
 			case "driver":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				h.Driver = d.Val()
 			case "redis_address":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				h.RedisAddress = d.Val()
 			case "auth_endpoint":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				h.AuthEndpoint = d.Val()
+			case "broadcast_secret":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.BroadcastSecret = d.Val()
 			}
 		}
 	}
@@ -160,9 +187,17 @@ func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 }
 
 func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error {
+	if h.BroadcastSecret != "" {
+		headerSecret := r.Header.Get("X-Broadcast-Secret")
+		if subtle.ConstantTimeCompare([]byte(h.BroadcastSecret), []byte(headerSecret)) != 1 {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return errors.New("invalid broadcast secret")
+		}
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return nil
+		return errors.New("method not allowed")
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -173,7 +208,7 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error
 
 	if channel == "" || message == "" {
 		http.Error(w, "Missing channel or message", http.StatusBadRequest)
-		return nil
+		return errors.New("missing channel or message")
 	}
 
 	if h.hub == nil || h.hub.broker == nil {
@@ -181,9 +216,9 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error
 		return errors.New("hub or broker not initialized")
 	}
 
-	err := h.hub.broker.Publish(channel, []byte(message))
+	err := h.hub.broker.Publish(r.Context(), channel, []byte(message))
 	if err != nil {
-		log.Printf("error publishing message: %v", err)
+		h.log.Error("error publishing message", zap.Error(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return err
 	}
@@ -193,17 +228,15 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error
 }
 
 func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
-	authReq, err := http.NewRequest(http.MethodGet, h.AuthEndpoint, nil)
+	authReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.AuthEndpoint, nil)
 	if err != nil {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return err
 	}
-	if cookie, err := r.Cookie("AUTH_TOKEN"); err == nil {
-		authReq.AddCookie(cookie)
-	}
 
-	httpClient := &http.Client{}
-	resp, err := httpClient.Do(authReq)
+	authReq.Header = r.Header.Clone()
+
+	resp, err := h.httpClient.Do(authReq)
 	if err != nil {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return err
@@ -251,19 +284,17 @@ var (
 ### `cadsock/hub.go`
 
 ```go
-package main
+package cadsock
 
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
-
-var ctx = context.Background()
 
 const (
 	writeWait      = 10 * time.Second
@@ -275,6 +306,13 @@ const (
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
 	Channel string `json:"channel"`
+}
+
+type ServerProtocolMessage struct {
+	Type    string          `json:"type"`
+	Channel string          `json:"channel,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 type Client struct {
@@ -296,13 +334,13 @@ func (c *Client) readPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				c.hub.log.Debug("websocket closed unexpectedly", zap.Error(err))
 			}
 			break
 		}
 		var msg ClientProtocolMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("error decoding client message: %v", err)
+			c.hub.log.Warn("could not decode client message", zap.Error(err))
 			continue
 		}
 		switch msg.Action {
@@ -339,8 +377,8 @@ func (c *Client) writePump() {
 }
 
 type Broker interface {
-	Publish(channel string, message []byte) error
-	Subscribe() (<-chan *BrokerMessage, error)
+	Publish(ctx context.Context, channel string, message []byte) error
+	Subscribe(ctx context.Context) (<-chan *BrokerMessage, error)
 	Close() error
 }
 
@@ -359,12 +397,12 @@ func NewMemoryBroker() *MemoryBroker {
 	}
 }
 
-func (b *MemoryBroker) Publish(channel string, message []byte) error {
+func (b *MemoryBroker) Publish(ctx context.Context, channel string, message []byte) error {
 	b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}
 	return nil
 }
 
-func (b *MemoryBroker) Subscribe() (<-chan *BrokerMessage, error) {
+func (b *MemoryBroker) Subscribe(ctx context.Context) (<-chan *BrokerMessage, error) {
 	return b.broadcast, nil
 }
 
@@ -386,14 +424,13 @@ func NewRedisBroker(address string) *RedisBroker {
 	}
 }
 
-func (b *RedisBroker) Publish(channel string, message []byte) error {
+func (b *RedisBroker) Publish(ctx context.Context, channel string, message []byte) error {
 	return b.client.Publish(ctx, "realtime:"+channel, message).Err()
 }
 
-func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
+func (b *RedisBroker) Subscribe(ctx context.Context) (<-chan *BrokerMessage, error) {
 	pubsub := b.client.PSubscribe(ctx, "realtime:*")
 	if _, err := pubsub.Receive(ctx); err != nil {
-		log.Printf("[RedisBroker] Failed to receive subscription confirmation: %v", err)
 		return nil, err
 	}
 
@@ -402,10 +439,18 @@ func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
 		defer close(ch)
 		defer pubsub.Close()
 		redisCh := pubsub.Channel()
-		for msg := range redisCh {
-			ch <- &BrokerMessage{
-				Channel: msg.Channel[len("realtime:"):],
-				Payload: []byte(msg.Payload),
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-redisCh:
+				if !ok {
+					return
+				}
+				ch <- &BrokerMessage{
+					Channel: msg.Channel[len("realtime:"):],
+					Payload: []byte(msg.Payload),
+				}
 			}
 		}
 	}()
@@ -425,6 +470,8 @@ type Hub struct {
 	subscribe   chan subscription
 	unsubscribe chan subscription
 	shutdown    chan struct{}
+	log         *zap.Logger
+	ctx         context.Context
 }
 
 type subscription struct {
@@ -432,7 +479,7 @@ type subscription struct {
 	channel string
 }
 
-func NewHub(broker Broker) *Hub {
+func NewHub(broker Broker, log *zap.Logger, ctx context.Context) *Hub {
 	return &Hub{
 		broker:      broker,
 		register:    make(chan *Client),
@@ -442,6 +489,8 @@ func NewHub(broker Broker) *Hub {
 		channels:    make(map[string]map[*Client]bool),
 		clients:     make(map[*Client]map[string]bool),
 		shutdown:    make(chan struct{}),
+		log:         log,
+		ctx:         ctx,
 	}
 }
 
@@ -452,15 +501,36 @@ func (h *Hub) Shutdown() {
 func (h *Hub) Run() {
 	var brokerCh <-chan *BrokerMessage
 	var err error
+	const maxBackoff = 30 * time.Second
+	nextBackoff := 1 * time.Second
 
 	for {
-		brokerCh, err = h.broker.Subscribe()
+		select {
+		case <-h.ctx.Done():
+			h.log.Info("hub context cancelled, stopping broker subscription attempts")
+			return
+		default:
+		}
+
+		brokerCh, err = h.broker.Subscribe(h.ctx)
 		if err == nil {
-			log.Println("Successfully subscribed to broker")
+			h.log.Info("successfully subscribed to broker")
 			break
 		}
-		log.Printf("Failed to subscribe to broker, retrying in 5 seconds: %v", err)
-		time.Sleep(5 * time.Second)
+		h.log.Error("failed to subscribe to broker, retrying",
+			zap.Duration("retry_in", nextBackoff),
+			zap.Error(err),
+		)
+
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-time.After(nextBackoff):
+			nextBackoff *= 2
+			if nextBackoff > maxBackoff {
+				nextBackoff = maxBackoff
+			}
+		}
 	}
 
 	for {
@@ -488,7 +558,13 @@ func (h *Hub) Run() {
 			}
 			h.channels[sub.channel][sub.client] = true
 			h.clients[sub.client][sub.channel] = true
-			log.Printf("Client %s subscribed to channel %s", sub.client.UserID, sub.channel)
+			h.log.Info("client subscribed",
+				zap.String("user_id", sub.client.UserID),
+				zap.String("channel", sub.channel),
+			)
+
+			response, _ := json.Marshal(ServerProtocolMessage{Type: "subscribed", Channel: sub.channel})
+			sub.client.send <- response
 
 		case sub := <-h.unsubscribe:
 			if clients, ok := h.channels[sub.channel]; ok {
@@ -500,27 +576,53 @@ func (h *Hub) Run() {
 			if channels, ok := h.clients[sub.client]; ok {
 				delete(channels, sub.channel)
 			}
-			log.Printf("Client %s unsubscribed from channel %s", sub.client.UserID, sub.channel)
+			h.log.Info("client unsubscribed",
+				zap.String("user_id", sub.client.UserID),
+				zap.String("channel", sub.channel),
+			)
+			response, _ := json.Marshal(ServerProtocolMessage{Type: "unsubscribed", Channel: sub.channel})
+			sub.client.send <- response
 
 		case msg := <-brokerCh:
+			wrappedMsg, err := json.Marshal(ServerProtocolMessage{
+				Type:    "message",
+				Channel: msg.Channel,
+				Payload: msg.Payload,
+			})
+			if err != nil {
+				h.log.Error("failed to marshal broadcast message", zap.Error(err))
+				continue
+			}
 			if clients, ok := h.channels[msg.Channel]; ok {
 				for client := range clients {
 					select {
-					case client.send <- msg.Payload:
+					case client.send <- wrappedMsg:
 					default:
+						h.log.Warn("client send buffer full, disconnecting",
+							zap.String("user_id", client.UserID),
+							zap.String("channel", msg.Channel),
+						)
 						close(client.send)
 						delete(clients, client)
 					}
 				}
 			}
-		
+
 		case <-h.shutdown:
-			log.Println("Hub received shutdown signal. Closing client connections.")
+			h.log.Info("hub received shutdown signal, closing client connections")
 			for client := range h.clients {
 				close(client.send)
 			}
 			h.broker.Close()
-			log.Println("Hub shutdown complete.")
+			h.log.Info("hub shutdown complete")
+			return
+
+		case <-h.ctx.Done():
+			h.log.Info("hub context cancelled, shutting down")
+			for client := range h.clients {
+				close(client.send)
+			}
+			h.broker.Close()
 			return
 		}
 	}
@@ -550,98 +652,14 @@ handle @go_paths {
     abort @is_bad_origin
     
     go_handler {
+        broadcast_secret "a-very-strong-and-secret-key-for-broadcast"
         # driver redis
         # redis_address localhost:6379
         # auth_endpoint http://localhost:8080/auth.php
     }
 }
 
-php_server {
-	root /app
-}
-```
-
----
-
-### `examples/frankenphp-app/composer.json`
-
-```json
-{
-    "require": {
-        "firebase/php-jwt": "^6.10"
-    },
-    "config": {
-        "allow-plugins": {
-            "php-http/discovery": true
-        }
-    }
-}
-```
-
----
-
-### `examples/frankenphp-app/login.php`
-
-```php
-<?php
-require_once __DIR__ . '/vendor/autoload.php';
-use Firebase\JWT\JWT;
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    exit;
-}
-
-$input = json_decode(file_get_contents('php://input'), true);
-$userId = $input['userId'] ?? null;
-
-if (empty($userId)) {
-    http_response_code(400);
-    echo json_encode(['error' => 'User ID is required']);
-    exit;
-}
-
-$secretKey = 'your-super-secret-key-that-no-one-knows';
-$payload = [
-    'iat' => time(),
-    'exp' => time() + 3600,
-    'sub' => $userId
-];
-
-$jwt = JWT::encode($payload, $secretKey, 'HS256');
-
-setcookie('AUTH_TOKEN', $jwt, [
-    'expires' => time() + 3600,
-    'path' => '/',
-    'httponly' => true,
-    'samesite' => 'Strict'
-]);
-
-http_response_code(200);
-echo json_encode(['status' => 'ok']);
-```
-
----
-
-### `examples/frankenphp-app/logout.php`
-
-```php
-<?php
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    exit;
-}
-
-setcookie('AUTH_TOKEN', '', [
-    'expires' => time() - 3600,
-    'path' => '/',
-    'httponly' => true,
-    'samesite' => 'Strict'
-]);
-
-http_response_code(200);
-echo json_encode(['status' => 'logged_out']);
+php_server
 ```
 
 ---
@@ -664,7 +682,13 @@ if (!$token) {
     exit;
 }
 
-$secretKey = 'your-super-secret-key-that-no-one-knows';
+$secretKey = getenv('JWT_SECRET_KEY');
+if (empty($secretKey)) {
+    error_log('JWT_SECRET_KEY environment variable not set');
+    http_response_code(500);
+    echo json_encode(['error' => 'Server configuration error']);
+    exit;
+}
 
 try {
     $decoded = JWT::decode($token, new Key($secretKey, 'HS256'));
@@ -692,6 +716,10 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
 <head>
     <meta charset="UTF-8">
     <title>WebSocket Test</title>
+    <style>
+        .msg-system { color: blue; font-style: italic; }
+        .msg-error { color: red; font-weight: bold; }
+    </style>
 </head>
 <body>
     <h1>WebSocket Channels</h1>
@@ -749,9 +777,32 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
             };
 
             socket.onmessage = function(event) {
-                let message = document.createElement("li");
-                message.textContent = event.data;
-                messagesList.appendChild(message);
+                const messageData = JSON.parse(event.data);
+                let li = document.createElement("li");
+
+                switch (messageData.type) {
+                    case 'message':
+                        // The payload is already a JSON string, so we parse it again
+                        // to display it as a clean string without quotes.
+                        li.textContent = JSON.parse(messageData.payload);
+                        break;
+                    case 'subscribed':
+                        li.textContent = `Successfully subscribed to channel "${messageData.channel}".`;
+                        li.className = 'msg-system';
+                        break;
+                    case 'unsubscribed':
+                         li.textContent = `Successfully unsubscribed from channel "${messageData.channel}".`;
+                        li.className = 'msg-system';
+                        break;
+                     case 'error':
+                        li.textContent = `Error: ${messageData.error}`;
+                        li.className = 'msg-error';
+                        break;
+                    default:
+                        li.textContent = `Unknown message type: ${event.data}`;
+                        break;
+                }
+                messagesList.appendChild(li);
             };
 
             socket.onclose = function(event) {
@@ -783,11 +834,6 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
             };
             socket.send(JSON.stringify(subscribeMsg));
             console.log(`Sent subscription request for channel: ${channel}`);
-            
-            let message = document.createElement("li");
-            message.style.color = 'blue';
-            message.textContent = `Subscription request sent for channel "${channel}".`;
-            messagesList.appendChild(message);
         }
 
         loginForm.addEventListener('submit', async (e) => {
@@ -798,9 +844,7 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
             try {
                 const response = await fetch('/login.php', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ userId: userId })
                 });
 
@@ -860,31 +904,54 @@ function validate_csrf_token($token) {
 
 function broadcast(string $channel, string $message): bool
 {
+    $secret = getenv('BROADCAST_SECRET_KEY');
+    if (empty($secret)) {
+        error_log('BROADCAST_SECRET_KEY environment variable not set');
+        return false;
+    }
+    
     $url = 'http://localhost:8080/internal/broadcast';
     $data = http_build_query([
         'channel' => $channel,
         'message' => $message,
     ]);
 
+    $headers = [
+        "Content-type: application/x-www-form-urlencoded",
+        "X-Broadcast-Secret: " . $secret,
+    ];
+
     $options = [
         'http' => [
-            'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
+            'header'  => implode("\r\n", $headers),
             'method'  => 'POST',
             'content' => $data,
             'timeout' => 5,
+            'ignore_errors' => true,
         ],
     ];
 
     $context = stream_context_create($options);
-    $result = @file_get_contents($url, false, $context);
 
-    if ($result === false) {
-        $error = error_get_last();
-        error_log("Broadcast failed: " . ($error['message'] ?? 'Unknown error'));
+    set_error_handler(function($severity, $message, $file, $line) {
+        throw new ErrorException($message, 0, $severity, $file, $line);
+    });
+
+    try {
+        $result = file_get_contents($url, false, $context);
+    } catch (ErrorException $e) {
+        error_log("Broadcast request failed: " . $e->getMessage());
+        restore_error_handler();
+        return false;
+    }
+    restore_error_handler();
+
+    if ($result === false || !isset($http_response_header[0])) {
+         error_log("Broadcast failed: No response or headers from server.");
         return false;
     }
 
-    $statusCode = (int) substr($http_response_header, 9, 3);
+    $statusCode = (int) substr($http_response_header[0], 9, 3);
     return $statusCode >= 200 && $statusCode < 300;
 }
 
@@ -898,9 +965,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $fullMessage = "($channel) " . $message . " at " . date('H:i:s');
         
-        if (broadcast($channel, $fullMessage)) {
+        if (broadcast($channel, json_encode($fullMessage))) {
             $status = "Message sent to channel '{$channel}'.";
         } else {
+            http_response_code(500);
             $status = "Error: Failed to broadcast message.";
         }
     }
@@ -937,4 +1005,90 @@ $csrf_token = generate_csrf_token();
     </form>
 </body>
 </html>
+```
+
+---
+
+### `examples/frankenphp-app/send_cli.php`
+
+```php
+<?php
+
+// A command-line script to demonstrate server-to-server broadcasting.
+// Usage: php examples/frankenphp-app/send_cli.php "my channel" "My message from the backend"
+
+if (php_sapi_name() !== 'cli') {
+    die("This script can only be run from the command line.");
+}
+
+// Load environment variables if a .env file exists (useful for local dev)
+if (file_exists(__DIR__ . '/.env')) {
+    $lines = file(__DIR__ . '/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#') === 0) continue;
+        list($name, $value) = explode('=', $line, 2);
+        $_ENV[$name] = $value;
+        $_SERVER[$name] = $value;
+        putenv("$name=$value");
+    }
+}
+
+function broadcast(string $channel, string $message): bool
+{
+    $secret = getenv('BROADCAST_SECRET_KEY');
+    if (empty($secret)) {
+        error_log('BROADCAST_SECRET_KEY environment variable not set');
+        return false;
+    }
+    
+    $url = 'http://localhost:8080/internal/broadcast';
+    $payload = json_encode("CLI: " . $message);
+    $data = http_build_query([
+        'channel' => $channel,
+        'message' => $payload,
+    ]);
+
+    $headers = [
+        "Content-type: application/x-www-form-urlencoded",
+        "X-Broadcast-Secret: " . $secret,
+    ];
+
+    $options = [
+        'http' => [
+            'header'  => implode("\r\n", $headers),
+            'method'  => 'POST',
+            'content' => $data,
+            'timeout' => 5,
+            'ignore_errors' => true,
+        ],
+    ];
+
+    $context = stream_context_create($options);
+    $result = file_get_contents($url, false, $context);
+
+    if ($result === false || !isset($http_response_header[0])) {
+         error_log("Broadcast failed: Could not connect or no response from server.");
+        return false;
+    }
+
+    $statusCode = (int) substr($http_response_header[0], 9, 3);
+    if ($statusCode >= 200 && $statusCode < 300) {
+        return true;
+    }
+    
+    error_log("Broadcast failed with status code: {$statusCode}. Response: " . $result);
+    return false;
+}
+
+$channel = $argv[1] ?? 'default';
+$message = $argv[2] ?? 'A message from the CLI script at ' . date('H:i:s');
+
+echo "Attempting to broadcast to channel '{$channel}'...\n";
+
+if (broadcast($channel, $message)) {
+    echo "Message sent successfully.\n";
+} else {
+    echo "Failed to send message. Check server logs for details.\n";
+    exit(1);
+}
 ```

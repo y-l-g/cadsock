@@ -14,27 +14,50 @@ function validate_csrf_token($token) {
 
 function broadcast(string $channel, string $message): bool
 {
+    $secret = getenv('BROADCAST_SECRET_KEY');
+    if (empty($secret)) {
+        error_log('BROADCAST_SECRET_KEY environment variable not set');
+        return false;
+    }
+    
     $url = 'http://localhost:8080/internal/broadcast';
     $data = http_build_query([
         'channel' => $channel,
         'message' => $message,
     ]);
 
+    $headers = [
+        "Content-type: application/x-www-form-urlencoded",
+        "X-Broadcast-Secret: " . $secret,
+    ];
+
     $options = [
         'http' => [
-            'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
+            'header'  => implode("\r\n", $headers),
             'method'  => 'POST',
             'content' => $data,
             'timeout' => 5,
+            'ignore_errors' => true,
         ],
     ];
 
     $context = stream_context_create($options);
-    $result = @file_get_contents($url, false, $context);
 
-    if ($result === false) {
-        $error = error_get_last();
-        error_log("Broadcast failed: " . ($error['message'] ?? 'Unknown error'));
+    set_error_handler(function($severity, $message, $file, $line) {
+        throw new ErrorException($message, 0, $severity, $file, $line);
+    });
+
+    try {
+        $result = file_get_contents($url, false, $context);
+    } catch (ErrorException $e) {
+        error_log("Broadcast request failed: " . $e->getMessage());
+        restore_error_handler();
+        return false;
+    }
+    restore_error_handler();
+
+    if ($result === false || !isset($http_response_header[0])) {
+         error_log("Broadcast failed: No response or headers from server.");
         return false;
     }
 
@@ -52,9 +75,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $fullMessage = "($channel) " . $message . " at " . date('H:i:s');
         
-        if (broadcast($channel, $fullMessage)) {
+        if (broadcast($channel, json_encode($fullMessage))) {
             $status = "Message sent to channel '{$channel}'.";
         } else {
+            http_response_code(500);
             $status = "Error: Failed to broadcast message.";
         }
     }

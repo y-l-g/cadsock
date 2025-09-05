@@ -13,7 +13,13 @@ if (!$token) {
     exit;
 }
 
-$secretKey = 'your-super-secret-key-that-no-one-knows';
+$secretKey = getenv('JWT_SECRET_KEY');
+if (empty($secretKey)) {
+    error_log('JWT_SECRET_KEY environment variable not set');
+    http_response_code(500);
+    echo json_encode(['error' => 'Server configuration error']);
+    exit;
+}
 
 try {
     $decoded = JWT::decode($token, new Key($secretKey, 'HS256'));

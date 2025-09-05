@@ -1,9 +1,10 @@
 package cadsock
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"net/url"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 var upgrader = websocket.Upgrader{
@@ -36,10 +38,15 @@ func init() {
 }
 
 type GoHandler struct {
-	Driver       string `json:"driver,omitempty"`
-	RedisAddress string `json:"redis_address,omitempty"`
-	AuthEndpoint string `json:"auth_endpoint,omitempty"`
-	hub          *Hub
+	Driver          string `json:"driver,omitempty"`
+	RedisAddress    string `json:"redis_address,omitempty"`
+	AuthEndpoint    string `json:"auth_endpoint,omitempty"`
+	BroadcastSecret string `json:"broadcast_secret,omitempty"`
+	hub             *Hub
+	log             *zap.Logger
+	httpClient      *http.Client
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -50,24 +57,29 @@ func (GoHandler) CaddyModule() caddy.ModuleInfo {
 }
 
 func (h *GoHandler) Provision(ctx caddy.Context) error {
+	h.log = ctx.Logger(h)
+	h.httpClient = &http.Client{}
+	h.ctx, h.cancel = context.WithCancel(ctx)
+
 	var broker Broker
 	switch h.Driver {
 	case "redis":
-		log.Println("Using Redis broker")
+		h.log.Info("using redis broker", zap.String("address", h.RedisAddress))
 		broker = NewRedisBroker(h.RedisAddress)
 	default:
-		log.Println("Using in-memory broker")
+		h.log.Info("using in-memory broker")
 		broker = NewMemoryBroker()
 	}
 
-	h.hub = NewHub(broker)
+	h.hub = NewHub(broker, h.log.Named("hub"), h.ctx)
 	go h.hub.Run()
 
 	return nil
 }
 
 func (h *GoHandler) Cleanup() error {
-	log.Println("Shutting down hub...")
+	h.log.Info("cleaning up handler resources")
+	h.cancel()
 	h.hub.Shutdown()
 	return nil
 }
@@ -77,28 +89,32 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	h.AuthEndpoint = "http://localhost:8080/auth.php"
 
 	for d.Next() {
-		if !d.NextArg() {
-			for d.NextBlock(0) {
-				switch d.Val() {
-				case "driver":
-					if !d.NextArg() {
-						return d.ArgErr()
-					}
-					h.Driver = d.Val()
-				case "redis_address":
-					if !d.NextArg() {
-						return d.ArgErr()
-					}
-					h.RedisAddress = d.Val()
-				case "auth_endpoint":
-					if !d.NextArg() {
-						return d.ArgErr()
-					}
-					h.AuthEndpoint = d.Val()
-				}
-			}
-		} else {
+		if d.NextArg() {
 			return d.ArgErr()
+		}
+		for d.NextBlock(0) {
+			switch d.Val() {
+			case "driver":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.Driver = d.Val()
+			case "redis_address":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.RedisAddress = d.Val()
+			case "auth_endpoint":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.AuthEndpoint = d.Val()
+			case "broadcast_secret":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.BroadcastSecret = d.Val()
+			}
 		}
 	}
 	return nil
@@ -115,16 +131,24 @@ func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	case "/ws":
 		return h.serveWs(w, r)
 	case "/internal/broadcast":
-		return h.serveBroadcast(w, r)
+		return h.serveBroadcast(w, r, r.Context())
 	default:
 		return next.ServeHTTP(w, r)
 	}
 }
 
-func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error {
+func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request, ctx context.Context) error {
+	if h.BroadcastSecret != "" {
+		headerSecret := r.Header.Get("X-Broadcast-Secret")
+		if subtle.ConstantTimeCompare([]byte(h.BroadcastSecret), []byte(headerSecret)) != 1 {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return errors.New("invalid broadcast secret")
+		}
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return nil
+		return errors.New("method not allowed")
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -135,7 +159,7 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error
 
 	if channel == "" || message == "" {
 		http.Error(w, "Missing channel or message", http.StatusBadRequest)
-		return nil
+		return errors.New("missing channel or message")
 	}
 
 	if h.hub == nil || h.hub.broker == nil {
@@ -143,9 +167,9 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error
 		return errors.New("hub or broker not initialized")
 	}
 
-	err := h.hub.broker.Publish(channel, []byte(message))
+	err := h.hub.broker.Publish(ctx, channel, []byte(message))
 	if err != nil {
-		log.Printf("error publishing message: %v", err)
+		h.log.Error("error publishing message", zap.Error(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return err
 	}
@@ -155,17 +179,15 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error
 }
 
 func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
-	authReq, err := http.NewRequest(http.MethodGet, h.AuthEndpoint, nil)
+	authReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.AuthEndpoint, nil)
 	if err != nil {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return err
 	}
-	if cookie, err := r.Cookie("AUTH_TOKEN"); err == nil {
-		authReq.AddCookie(cookie)
-	}
 
-	httpClient := &http.Client{}
-	resp, err := httpClient.Do(authReq)
+	authReq.Header = r.Header.Clone()
+
+	resp, err := h.httpClient.Do(authReq)
 	if err != nil {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return err

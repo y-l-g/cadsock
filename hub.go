@@ -3,14 +3,12 @@ package cadsock
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
-
-var ctx = context.Background()
 
 const (
 	writeWait      = 10 * time.Second
@@ -22,6 +20,13 @@ const (
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
 	Channel string `json:"channel"`
+}
+
+type ServerProtocolMessage struct {
+	Type    string          `json:"type"`
+	Channel string          `json:"channel,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 type Client struct {
@@ -43,13 +48,13 @@ func (c *Client) readPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				c.hub.log.Debug("websocket closed unexpectedly", zap.Error(err))
 			}
 			break
 		}
 		var msg ClientProtocolMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("error decoding client message: %v", err)
+			c.hub.log.Warn("could not decode client message", zap.Error(err))
 			continue
 		}
 		switch msg.Action {
@@ -86,8 +91,8 @@ func (c *Client) writePump() {
 }
 
 type Broker interface {
-	Publish(channel string, message []byte) error
-	Subscribe() (<-chan *BrokerMessage, error)
+	Publish(ctx context.Context, channel string, message []byte) error
+	Subscribe(ctx context.Context) (<-chan *BrokerMessage, error)
 	Close() error
 }
 
@@ -106,12 +111,12 @@ func NewMemoryBroker() *MemoryBroker {
 	}
 }
 
-func (b *MemoryBroker) Publish(channel string, message []byte) error {
+func (b *MemoryBroker) Publish(ctx context.Context, channel string, message []byte) error {
 	b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}
 	return nil
 }
 
-func (b *MemoryBroker) Subscribe() (<-chan *BrokerMessage, error) {
+func (b *MemoryBroker) Subscribe(ctx context.Context) (<-chan *BrokerMessage, error) {
 	return b.broadcast, nil
 }
 
@@ -133,14 +138,13 @@ func NewRedisBroker(address string) *RedisBroker {
 	}
 }
 
-func (b *RedisBroker) Publish(channel string, message []byte) error {
+func (b *RedisBroker) Publish(ctx context.Context, channel string, message []byte) error {
 	return b.client.Publish(ctx, "realtime:"+channel, message).Err()
 }
 
-func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
+func (b *RedisBroker) Subscribe(ctx context.Context) (<-chan *BrokerMessage, error) {
 	pubsub := b.client.PSubscribe(ctx, "realtime:*")
 	if _, err := pubsub.Receive(ctx); err != nil {
-		log.Printf("[RedisBroker] Failed to receive subscription confirmation: %v", err)
 		return nil, err
 	}
 
@@ -149,10 +153,18 @@ func (b *RedisBroker) Subscribe() (<-chan *BrokerMessage, error) {
 		defer close(ch)
 		defer pubsub.Close()
 		redisCh := pubsub.Channel()
-		for msg := range redisCh {
-			ch <- &BrokerMessage{
-				Channel: msg.Channel[len("realtime:"):],
-				Payload: []byte(msg.Payload),
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-redisCh:
+				if !ok {
+					return
+				}
+				ch <- &BrokerMessage{
+					Channel: msg.Channel[len("realtime:"):],
+					Payload: []byte(msg.Payload),
+				}
 			}
 		}
 	}()
@@ -172,6 +184,8 @@ type Hub struct {
 	subscribe   chan subscription
 	unsubscribe chan subscription
 	shutdown    chan struct{}
+	log         *zap.Logger
+	ctx         context.Context
 }
 
 type subscription struct {
@@ -179,7 +193,7 @@ type subscription struct {
 	channel string
 }
 
-func NewHub(broker Broker) *Hub {
+func NewHub(broker Broker, log *zap.Logger, ctx context.Context) *Hub {
 	return &Hub{
 		broker:      broker,
 		register:    make(chan *Client),
@@ -189,6 +203,8 @@ func NewHub(broker Broker) *Hub {
 		channels:    make(map[string]map[*Client]bool),
 		clients:     make(map[*Client]map[string]bool),
 		shutdown:    make(chan struct{}),
+		log:         log,
+		ctx:         ctx,
 	}
 }
 
@@ -199,15 +215,36 @@ func (h *Hub) Shutdown() {
 func (h *Hub) Run() {
 	var brokerCh <-chan *BrokerMessage
 	var err error
+	const maxBackoff = 30 * time.Second
+	nextBackoff := 1 * time.Second
 
 	for {
-		brokerCh, err = h.broker.Subscribe()
+		select {
+		case <-h.ctx.Done():
+			h.log.Info("hub context cancelled, stopping broker subscription attempts")
+			return
+		default:
+		}
+
+		brokerCh, err = h.broker.Subscribe(h.ctx)
 		if err == nil {
-			log.Println("Successfully subscribed to broker")
+			h.log.Info("successfully subscribed to broker")
 			break
 		}
-		log.Printf("Failed to subscribe to broker, retrying in 5 seconds: %v", err)
-		time.Sleep(5 * time.Second)
+		h.log.Error("failed to subscribe to broker, retrying",
+			zap.Duration("retry_in", nextBackoff),
+			zap.Error(err),
+		)
+
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-time.After(nextBackoff):
+			nextBackoff *= 2
+			if nextBackoff > maxBackoff {
+				nextBackoff = maxBackoff
+			}
+		}
 	}
 
 	for {
@@ -235,7 +272,13 @@ func (h *Hub) Run() {
 			}
 			h.channels[sub.channel][sub.client] = true
 			h.clients[sub.client][sub.channel] = true
-			log.Printf("Client %s subscribed to channel %s", sub.client.UserID, sub.channel)
+			h.log.Info("client subscribed",
+				zap.String("user_id", sub.client.UserID),
+				zap.String("channel", sub.channel),
+			)
+
+			response, _ := json.Marshal(ServerProtocolMessage{Type: "subscribed", Channel: sub.channel})
+			sub.client.send <- response
 
 		case sub := <-h.unsubscribe:
 			if clients, ok := h.channels[sub.channel]; ok {
@@ -247,27 +290,53 @@ func (h *Hub) Run() {
 			if channels, ok := h.clients[sub.client]; ok {
 				delete(channels, sub.channel)
 			}
-			log.Printf("Client %s unsubscribed from channel %s", sub.client.UserID, sub.channel)
+			h.log.Info("client unsubscribed",
+				zap.String("user_id", sub.client.UserID),
+				zap.String("channel", sub.channel),
+			)
+			response, _ := json.Marshal(ServerProtocolMessage{Type: "unsubscribed", Channel: sub.channel})
+			sub.client.send <- response
 
 		case msg := <-brokerCh:
+			wrappedMsg, err := json.Marshal(ServerProtocolMessage{
+				Type:    "message",
+				Channel: msg.Channel,
+				Payload: msg.Payload,
+			})
+			if err != nil {
+				h.log.Error("failed to marshal broadcast message", zap.Error(err))
+				continue
+			}
 			if clients, ok := h.channels[msg.Channel]; ok {
 				for client := range clients {
 					select {
-					case client.send <- msg.Payload:
+					case client.send <- wrappedMsg:
 					default:
+						h.log.Warn("client send buffer full, disconnecting",
+							zap.String("user_id", client.UserID),
+							zap.String("channel", msg.Channel),
+						)
 						close(client.send)
 						delete(clients, client)
 					}
 				}
 			}
-		
+
 		case <-h.shutdown:
-			log.Println("Hub received shutdown signal. Closing client connections.")
+			h.log.Info("hub received shutdown signal, closing client connections")
 			for client := range h.clients {
 				close(client.send)
 			}
 			h.broker.Close()
-			log.Println("Hub shutdown complete.")
+			h.log.Info("hub shutdown complete")
+			return
+
+		case <-h.ctx.Done():
+			h.log.Info("hub context cancelled, shutting down")
+			for client := range h.clients {
+				close(client.send)
+			}
+			h.broker.Close()
 			return
 		}
 	}

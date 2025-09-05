@@ -6,6 +6,10 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
 <head>
     <meta charset="UTF-8">
     <title>WebSocket Test</title>
+    <style>
+        .msg-system { color: blue; font-style: italic; }
+        .msg-error { color: red; font-weight: bold; }
+    </style>
 </head>
 <body>
     <h1>WebSocket Channels</h1>
@@ -63,9 +67,30 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
             };
 
             socket.onmessage = function(event) {
-                let message = document.createElement("li");
-                message.textContent = event.data;
-                messagesList.appendChild(message);
+                const messageData = JSON.parse(event.data);
+                let li = document.createElement("li");
+
+                switch (messageData.type) {
+                    case 'message':
+                        li.textContent = messageData.payload;
+                        break;
+                    case 'subscribed':
+                        li.textContent = `Successfully subscribed to channel "${messageData.channel}".`;
+                        li.className = 'msg-system';
+                        break;
+                    case 'unsubscribed':
+                         li.textContent = `Successfully unsubscribed from channel "${messageData.channel}".`;
+                        li.className = 'msg-system';
+                        break;
+                     case 'error':
+                        li.textContent = `Error: ${messageData.error}`;
+                        li.className = 'msg-error';
+                        break;
+                    default:
+                        li.textContent = `Unknown message type: ${event.data}`;
+                        break;
+                }
+                messagesList.appendChild(li);
             };
 
             socket.onclose = function(event) {
@@ -97,11 +122,6 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
             };
             socket.send(JSON.stringify(subscribeMsg));
             console.log(`Sent subscription request for channel: ${channel}`);
-            
-            let message = document.createElement("li");
-            message.style.color = 'blue';
-            message.textContent = `Subscription request sent for channel "${channel}".`;
-            messagesList.appendChild(message);
         }
 
         loginForm.addEventListener('submit', async (e) => {
@@ -112,9 +132,7 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
             try {
                 const response = await fetch('/login.php', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ userId: userId })
                 });
 
