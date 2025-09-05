@@ -40,7 +40,8 @@ require (
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-)```
+)
+```
 
 ---
 
@@ -65,37 +66,23 @@ import (
 	"go.uber.org/zap"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		return u.Host == r.Host
-	},
-}
-
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
 
 type GoHandler struct {
-	Driver          string `json:"driver,omitempty"`
-	RedisAddress    string `json:"redis_address,omitempty"`
-	AuthEndpoint    string `json:"auth_endpoint,omitempty"`
-	BroadcastSecret string `json:"broadcast_secret,omitempty"`
+	Driver          string   `json:"driver,omitempty"`
+	RedisAddress    string   `json:"redis_address,omitempty"`
+	AuthEndpoint    string   `json:"auth_endpoint,omitempty"`
+	BroadcastSecret string   `json:"broadcast_secret,omitempty"`
+	AllowedOrigins  []string `json:"allowed_origins,omitempty"`
 	hub             *Hub
 	log             *zap.Logger
 	httpClient      *http.Client
 	ctx             context.Context
 	cancel          context.CancelFunc
+	upgrader        websocket.Upgrader
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -109,6 +96,31 @@ func (h *GoHandler) Provision(ctx caddy.Context) error {
 	h.log = ctx.Logger(h)
 	h.httpClient = &http.Client{}
 	h.ctx, h.cancel = context.WithCancel(ctx)
+
+	h.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			if len(h.AllowedOrigins) == 0 {
+				u, err := url.Parse(origin)
+				if err != nil {
+					return false
+				}
+				return u.Host == r.Host
+			}
+			for _, allowedOrigin := range h.AllowedOrigins {
+				if allowedOrigin == origin {
+					return true
+				}
+			}
+			h.log.Warn("websocket origin not allowed", zap.String("origin", origin))
+			return false
+		},
+	}
 
 	var broker Broker
 	switch h.Driver {
@@ -163,6 +175,11 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				h.BroadcastSecret = d.Val()
+			case "allowed_origins":
+				h.AllowedOrigins = d.RemainingArgs()
+				if len(h.AllowedOrigins) == 0 {
+					return d.ArgErr()
+				}
 			}
 		}
 	}
@@ -234,7 +251,18 @@ func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	authReq.Header = r.Header.Clone()
+	headersToForward := []string{
+		"Authorization",
+		"Cookie",
+		"User-Agent",
+		"X-Forwarded-For",
+		"X-Real-IP",
+	}
+	for _, headerName := range headersToForward {
+		if headerValue := r.Header.Get(headerName); headerValue != "" {
+			authReq.Header.Set(headerName, headerValue)
+		}
+	}
 
 	resp, err := h.httpClient.Do(authReq)
 	if err != nil {
@@ -256,7 +284,7 @@ func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
 		return errors.New("invalid auth response")
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return err
 	}
@@ -289,6 +317,8 @@ package cadsock
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -302,6 +332,28 @@ const (
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
 )
+
+const (
+	ActionSubscribe   = "subscribe"
+	ActionUnsubscribe = "unsubscribe"
+)
+
+const (
+	TypeMessage      = "message"
+	TypeSubscribed   = "subscribed"
+	TypeUnsubscribed = "unsubscribed"
+	TypeError        = "error"
+)
+
+type WebsocketConnection interface {
+	SetReadLimit(limit int64)
+	SetReadDeadline(t time.Time) error
+	SetPongHandler(h func(appData string) error)
+	ReadMessage() (messageType int, p []byte, err error)
+	SetWriteDeadline(t time.Time) error
+	WriteMessage(messageType int, data []byte) error
+	Close() error
+}
 
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
@@ -317,9 +369,25 @@ type ServerProtocolMessage struct {
 
 type Client struct {
 	hub    *Hub
-	conn   *websocket.Conn
+	conn   WebsocketConnection
 	send   chan []byte
 	UserID string
+}
+
+func (c *Client) sendErrorMessage(errMsg string) {
+	msg, err := json.Marshal(ServerProtocolMessage{
+		Type:  TypeError,
+		Error: errMsg,
+	})
+	if err != nil {
+		c.hub.log.Error("failed to marshal error message", zap.Error(err))
+		return
+	}
+	select {
+	case c.send <- msg:
+	default:
+		c.hub.log.Warn("client send buffer full, could not send error message", zap.String("user_id", c.UserID))
+	}
 }
 
 func (c *Client) readPump() {
@@ -341,13 +409,23 @@ func (c *Client) readPump() {
 		var msg ClientProtocolMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
 			c.hub.log.Warn("could not decode client message", zap.Error(err))
+			c.sendErrorMessage("invalid JSON message")
 			continue
 		}
+
+		if msg.Channel == "" {
+			c.sendErrorMessage("channel must be specified")
+			continue
+		}
+
 		switch msg.Action {
-		case "subscribe":
+		case ActionSubscribe:
 			c.hub.subscribe <- subscription{client: c, channel: msg.Channel}
-		case "unsubscribe":
+		case ActionUnsubscribe:
 			c.hub.unsubscribe <- subscription{client: c, channel: msg.Channel}
+		default:
+			c.hub.log.Warn("unknown client action", zap.String("action", msg.Action))
+			c.sendErrorMessage(fmt.Sprintf("unknown action: %s", msg.Action))
 		}
 	}
 }
@@ -398,8 +476,14 @@ func NewMemoryBroker() *MemoryBroker {
 }
 
 func (b *MemoryBroker) Publish(ctx context.Context, channel string, message []byte) error {
-	b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}
-	return nil
+	select {
+	case b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errors.New("memory broker channel is full")
+	}
 }
 
 func (b *MemoryBroker) Subscribe(ctx context.Context) (<-chan *BrokerMessage, error) {
@@ -499,16 +583,51 @@ func (h *Hub) Shutdown() {
 }
 
 func (h *Hub) Run() {
-	var brokerCh <-chan *BrokerMessage
-	var err error
-	const maxBackoff = 30 * time.Second
-	nextBackoff := 1 * time.Second
+	go h.runLoop()
+}
+
+func (h *Hub) runLoop() {
+	defer func() {
+		h.log.Info("hub shutdown complete")
+		h.broker.Close()
+		for client := range h.clients {
+			close(client.send)
+		}
+	}()
 
 	for {
 		select {
 		case <-h.ctx.Done():
-			h.log.Info("hub context cancelled, stopping broker subscription attempts")
+			h.log.Info("hub context cancelled, shutting down")
 			return
+		case <-h.shutdown:
+			h.log.Info("hub received shutdown signal, shutting down")
+			return
+		default:
+			err := h.processMessages()
+			if err != nil {
+				if err == context.Canceled || err == context.DeadlineExceeded {
+					return
+				}
+				h.log.Error("hub message processing loop failed, restarting", zap.Error(err))
+				time.Sleep(2 * time.Second)
+			}
+		}
+	}
+}
+
+func (h *Hub) processMessages() error {
+	const maxBackoff = 30 * time.Second
+	nextBackoff := 1 * time.Second
+	var brokerCh <-chan *BrokerMessage
+	var err error
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return h.ctx.Err()
+		case <-h.shutdown:
+			return nil
 		default:
 		}
 
@@ -524,7 +643,9 @@ func (h *Hub) Run() {
 
 		select {
 		case <-h.ctx.Done():
-			return
+			return h.ctx.Err()
+		case <-h.shutdown:
+			return nil
 		case <-time.After(nextBackoff):
 			nextBackoff *= 2
 			if nextBackoff > maxBackoff {
@@ -563,7 +684,7 @@ func (h *Hub) Run() {
 				zap.String("channel", sub.channel),
 			)
 
-			response, _ := json.Marshal(ServerProtocolMessage{Type: "subscribed", Channel: sub.channel})
+			response, _ := json.Marshal(ServerProtocolMessage{Type: TypeSubscribed, Channel: sub.channel})
 			sub.client.send <- response
 
 		case sub := <-h.unsubscribe:
@@ -580,12 +701,16 @@ func (h *Hub) Run() {
 				zap.String("user_id", sub.client.UserID),
 				zap.String("channel", sub.channel),
 			)
-			response, _ := json.Marshal(ServerProtocolMessage{Type: "unsubscribed", Channel: sub.channel})
+			response, _ := json.Marshal(ServerProtocolMessage{Type: TypeUnsubscribed, Channel: sub.channel})
 			sub.client.send <- response
 
-		case msg := <-brokerCh:
+		case msg, ok := <-brokerCh:
+			if !ok {
+				h.log.Warn("broker channel closed, attempting to reconnect")
+				return nil
+			}
 			wrappedMsg, err := json.Marshal(ServerProtocolMessage{
-				Type:    "message",
+				Type:    TypeMessage,
 				Channel: msg.Channel,
 				Payload: msg.Payload,
 			})
@@ -609,21 +734,10 @@ func (h *Hub) Run() {
 			}
 
 		case <-h.shutdown:
-			h.log.Info("hub received shutdown signal, closing client connections")
-			for client := range h.clients {
-				close(client.send)
-			}
-			h.broker.Close()
-			h.log.Info("hub shutdown complete")
-			return
+			return nil
 
 		case <-h.ctx.Done():
-			h.log.Info("hub context cancelled, shutting down")
-			for client := range h.clients {
-				close(client.send)
-			}
-			h.broker.Close()
-			return
+			return h.ctx.Err()
 		}
 	}
 }
@@ -641,22 +755,21 @@ func (h *Hub) Run() {
 
 :8080
 
-@is_bad_origin {
-    header Origin *
-    not header Origin http://localhost:8080
-}
-
 @go_paths path /ws /internal/broadcast
 
 handle @go_paths {
-    abort @is_bad_origin
-    
-    go_handler {
-        broadcast_secret "a-very-strong-and-secret-key-for-broadcast"
-        # driver redis
-        # redis_address localhost:6379
-        # auth_endpoint http://localhost:8080/auth.php
-    }
+	go_handler {
+		broadcast_secret "a-very-strong-and-secret-key-for-broadcast"
+		
+		# Add all the origins you want to allow here.
+		# For example, for a React development server on port 3000:
+		# allowed_origins http://localhost:8080 http://localhost:3000
+		allowed_origins http://localhost:8080
+
+		# driver redis
+		# redis_address localhost:6379
+		# auth_endpoint http://localhost:8080/auth.php
+	}
 }
 
 php_server
@@ -765,15 +878,30 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
         const subscribeBtn = document.getElementById('subscribe');
         const messagesList = document.getElementById('messages');
         const statusDiv = document.getElementById('connection-status');
+        
         let socket;
+        let reconnectInterval;
+        let reconnectAttempts = 0;
 
         function connect() {
+            // Prevent multiple parallel connection attempts
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                console.log('WebSocket is already connected.');
+                return;
+            }
+
             socket = new WebSocket("ws://localhost:8080/ws");
 
             socket.onopen = function(event) {
                 console.log('WebSocket connection opened.');
                 statusDiv.textContent = 'Connected';
                 statusDiv.style.color = 'green';
+                // Reset reconnect attempts on successful connection
+                reconnectAttempts = 0;
+                if (reconnectInterval) {
+                    clearInterval(reconnectInterval);
+                    reconnectInterval = null;
+                }
             };
 
             socket.onmessage = function(event) {
@@ -782,9 +910,8 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
 
                 switch (messageData.type) {
                     case 'message':
-                        // The payload is already a JSON string, so we parse it again
-                        // to display it as a clean string without quotes.
-                        li.textContent = JSON.parse(messageData.payload);
+                        // The payload can be any JSON value, we stringify it for display.
+                        li.textContent = `(Channel: ${messageData.channel}) Payload: ${JSON.stringify(JSON.parse(messageData.payload))}`;
                         break;
                     case 'subscribed':
                         li.textContent = `Successfully subscribed to channel "${messageData.channel}".`;
@@ -795,7 +922,7 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
                         li.className = 'msg-system';
                         break;
                      case 'error':
-                        li.textContent = `Error: ${messageData.error}`;
+                        li.textContent = `Server Error: ${messageData.error}`;
                         li.className = 'msg-error';
                         break;
                     default:
@@ -809,11 +936,32 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
                 console.log('WebSocket connection closed.', event.reason);
                 statusDiv.textContent = `Disconnected. (Code: ${event.code})`;
                 statusDiv.style.color = 'red';
+                // Attempt to reconnect if the closure was unexpected
+                if (event.code !== 1000) { // 1000 is normal closure
+                    scheduleReconnect();
+                }
             };
 
             socket.onerror = function(error) {
                 console.error('WebSocket Error:', error);
+                // An error will likely be followed by a close event, which will trigger reconnection.
             };
+        }
+
+        function scheduleReconnect() {
+            if (reconnectInterval) return; // Reconnect already scheduled
+
+            reconnectAttempts++;
+            // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
+            const delay = Math.min(30000, Math.pow(2, reconnectAttempts) * 1000);
+
+            statusDiv.textContent += ` Reconnecting in ${delay / 1000}s...`;
+            console.log(`Scheduling reconnect attempt ${reconnectAttempts} in ${delay}ms`);
+
+            reconnectInterval = setTimeout(() => {
+                reconnectInterval = null; // Clear the timer ID before attempting to connect
+                connect();
+            }, delay);
         }
 
         function subscribeToChannel() {
@@ -902,6 +1050,13 @@ function validate_csrf_token($token) {
     return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
 }
 
+/**
+ * Broadcasts a message to the cadsock server using cURL.
+ *
+ * @param string $channel The channel to publish to.
+ * @param string $message The JSON-encoded message payload.
+ * @return bool True on success (2xx status code), false on failure.
+ */
 function broadcast(string $channel, string $message): bool
 {
     $secret = getenv('BROADCAST_SECRET_KEY');
@@ -911,48 +1066,40 @@ function broadcast(string $channel, string $message): bool
     }
     
     $url = 'http://localhost:8080/internal/broadcast';
-    $data = http_build_query([
+    $postData = http_build_query([
         'channel' => $channel,
         'message' => $message,
     ]);
 
     $headers = [
-        "Content-type: application/x-www-form-urlencoded",
         "X-Broadcast-Secret: " . $secret,
     ];
 
-    $options = [
-        'http' => [
-            'header'  => implode("\r\n", $headers),
-            'method'  => 'POST',
-            'content' => $data,
-            'timeout' => 5,
-            'ignore_errors' => true,
-        ],
-    ];
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
 
-    $context = stream_context_create($options);
-
-    set_error_handler(function($severity, $message, $file, $line) {
-        throw new ErrorException($message, 0, $severity, $file, $line);
-    });
-
-    try {
-        $result = file_get_contents($url, false, $context);
-    } catch (ErrorException $e) {
-        error_log("Broadcast request failed: " . $e->getMessage());
-        restore_error_handler();
-        return false;
-    }
-    restore_error_handler();
-
-    if ($result === false || !isset($http_response_header[0])) {
-         error_log("Broadcast failed: No response or headers from server.");
+    $response = curl_exec($ch);
+    
+    if (curl_errno($ch)) {
+        error_log('cURL error broadcasting message: ' . curl_error($ch));
+        curl_close($ch);
         return false;
     }
 
-    $statusCode = (int) substr($http_response_header[0], 9, 3);
-    return $statusCode >= 200 && $statusCode < 300;
+    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($statusCode < 200 || $statusCode >= 300) {
+        error_log("Broadcast failed with status code: {$statusCode}. Response: " . $response);
+        return false;
+    }
+
+    return true;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -1033,6 +1180,13 @@ if (file_exists(__DIR__ . '/.env')) {
     }
 }
 
+/**
+ * Broadcasts a message to the cadsock server using cURL.
+ *
+ * @param string $channel The channel to publish to.
+ * @param string $message The JSON-encoded message payload.
+ * @return bool True on success (2xx status code), false on failure.
+ */
 function broadcast(string $channel, string $message): bool
 {
     $secret = getenv('BROADCAST_SECRET_KEY');
@@ -1042,50 +1196,51 @@ function broadcast(string $channel, string $message): bool
     }
     
     $url = 'http://localhost:8080/internal/broadcast';
-    $payload = json_encode("CLI: " . $message);
-    $data = http_build_query([
+    $postData = http_build_query([
         'channel' => $channel,
-        'message' => $payload,
+        'message' => $message,
     ]);
 
     $headers = [
-        "Content-type: application/x-www-form-urlencoded",
         "X-Broadcast-Secret: " . $secret,
     ];
 
-    $options = [
-        'http' => [
-            'header'  => implode("\r\n", $headers),
-            'method'  => 'POST',
-            'content' => $data,
-            'timeout' => 5,
-            'ignore_errors' => true,
-        ],
-    ];
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_VERBOSE, false); // Set to true for debugging
 
-    $context = stream_context_create($options);
-    $result = file_get_contents($url, false, $context);
-
-    if ($result === false || !isset($http_response_header[0])) {
-         error_log("Broadcast failed: Could not connect or no response from server.");
+    $response = curl_exec($ch);
+    
+    if (curl_errno($ch)) {
+        error_log('cURL error broadcasting message: ' . curl_error($ch));
+        curl_close($ch);
         return false;
     }
 
-    $statusCode = (int) substr($http_response_header[0], 9, 3);
-    if ($statusCode >= 200 && $statusCode < 300) {
-        return true;
+    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($statusCode < 200 || $statusCode >= 300) {
+        error_log("Broadcast failed with status code: {$statusCode}. Response: " . $response);
+        return false;
     }
-    
-    error_log("Broadcast failed with status code: {$statusCode}. Response: " . $result);
-    return false;
+
+    return true;
 }
 
+
 $channel = $argv[1] ?? 'default';
-$message = $argv[2] ?? 'A message from the CLI script at ' . date('H:i:s');
+$messageBody = $argv[2] ?? 'A message from the CLI script at ' . date('H:i:s');
+$payload = json_encode("CLI: " . $messageBody);
 
 echo "Attempting to broadcast to channel '{$channel}'...\n";
 
-if (broadcast($channel, $message)) {
+if (broadcast($channel, $payload)) {
     echo "Message sent successfully.\n";
 } else {
     echo "Failed to send message. Check server logs for details.\n";

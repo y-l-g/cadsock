@@ -12,6 +12,13 @@ function validate_csrf_token($token) {
     return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
 }
 
+/**
+ * Broadcasts a message to the cadsock server using cURL.
+ *
+ * @param string $channel The channel to publish to.
+ * @param string $message The JSON-encoded message payload.
+ * @return bool True on success (2xx status code), false on failure.
+ */
 function broadcast(string $channel, string $message): bool
 {
     $secret = getenv('BROADCAST_SECRET_KEY');
@@ -21,48 +28,40 @@ function broadcast(string $channel, string $message): bool
     }
     
     $url = 'http://localhost:8080/internal/broadcast';
-    $data = http_build_query([
+    $postData = http_build_query([
         'channel' => $channel,
         'message' => $message,
     ]);
 
     $headers = [
-        "Content-type: application/x-www-form-urlencoded",
         "X-Broadcast-Secret: " . $secret,
     ];
 
-    $options = [
-        'http' => [
-            'header'  => implode("\r\n", $headers),
-            'method'  => 'POST',
-            'content' => $data,
-            'timeout' => 5,
-            'ignore_errors' => true,
-        ],
-    ];
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
 
-    $context = stream_context_create($options);
-
-    set_error_handler(function($severity, $message, $file, $line) {
-        throw new ErrorException($message, 0, $severity, $file, $line);
-    });
-
-    try {
-        $result = file_get_contents($url, false, $context);
-    } catch (ErrorException $e) {
-        error_log("Broadcast request failed: " . $e->getMessage());
-        restore_error_handler();
-        return false;
-    }
-    restore_error_handler();
-
-    if ($result === false || !isset($http_response_header[0])) {
-         error_log("Broadcast failed: No response or headers from server.");
+    $response = curl_exec($ch);
+    
+    if (curl_errno($ch)) {
+        error_log('cURL error broadcasting message: ' . curl_error($ch));
+        curl_close($ch);
         return false;
     }
 
-    $statusCode = (int) substr($http_response_header[0], 9, 3);
-    return $statusCode >= 200 && $statusCode < 300;
+    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($statusCode < 200 || $statusCode >= 300) {
+        error_log("Broadcast failed with status code: {$statusCode}. Response: " . $response);
+        return false;
+    }
+
+    return true;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

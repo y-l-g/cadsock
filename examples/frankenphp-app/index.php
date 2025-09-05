@@ -55,15 +55,30 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
         const subscribeBtn = document.getElementById('subscribe');
         const messagesList = document.getElementById('messages');
         const statusDiv = document.getElementById('connection-status');
+        
         let socket;
+        let reconnectInterval;
+        let reconnectAttempts = 0;
 
         function connect() {
+            // Prevent multiple parallel connection attempts
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                console.log('WebSocket is already connected.');
+                return;
+            }
+
             socket = new WebSocket("ws://localhost:8080/ws");
 
             socket.onopen = function(event) {
                 console.log('WebSocket connection opened.');
                 statusDiv.textContent = 'Connected';
                 statusDiv.style.color = 'green';
+                // Reset reconnect attempts on successful connection
+                reconnectAttempts = 0;
+                if (reconnectInterval) {
+                    clearInterval(reconnectInterval);
+                    reconnectInterval = null;
+                }
             };
 
             socket.onmessage = function(event) {
@@ -72,7 +87,8 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
 
                 switch (messageData.type) {
                     case 'message':
-                        li.textContent = messageData.payload;
+                        // The payload can be any JSON value, we stringify it for display.
+                        li.textContent = `(Channel: ${messageData.channel}) Payload: ${JSON.stringify(JSON.parse(messageData.payload))}`;
                         break;
                     case 'subscribed':
                         li.textContent = `Successfully subscribed to channel "${messageData.channel}".`;
@@ -83,7 +99,7 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
                         li.className = 'msg-system';
                         break;
                      case 'error':
-                        li.textContent = `Error: ${messageData.error}`;
+                        li.textContent = `Server Error: ${messageData.error}`;
                         li.className = 'msg-error';
                         break;
                     default:
@@ -97,11 +113,32 @@ $isAuthenticated = isset($_COOKIE['AUTH_TOKEN']);
                 console.log('WebSocket connection closed.', event.reason);
                 statusDiv.textContent = `Disconnected. (Code: ${event.code})`;
                 statusDiv.style.color = 'red';
+                // Attempt to reconnect if the closure was unexpected
+                if (event.code !== 1000) { // 1000 is normal closure
+                    scheduleReconnect();
+                }
             };
 
             socket.onerror = function(error) {
                 console.error('WebSocket Error:', error);
+                // An error will likely be followed by a close event, which will trigger reconnection.
             };
+        }
+
+        function scheduleReconnect() {
+            if (reconnectInterval) return; // Reconnect already scheduled
+
+            reconnectAttempts++;
+            // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
+            const delay = Math.min(30000, Math.pow(2, reconnectAttempts) * 1000);
+
+            statusDiv.textContent += ` Reconnecting in ${delay / 1000}s...`;
+            console.log(`Scheduling reconnect attempt ${reconnectAttempts} in ${delay}ms`);
+
+            reconnectInterval = setTimeout(() => {
+                reconnectInterval = null; // Clear the timer ID before attempting to connect
+                connect();
+            }, delay);
         }
 
         function subscribeToChannel() {

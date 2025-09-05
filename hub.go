@@ -3,6 +3,8 @@ package cadsock
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,6 +18,28 @@ const (
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
 )
+
+const (
+	ActionSubscribe   = "subscribe"
+	ActionUnsubscribe = "unsubscribe"
+)
+
+const (
+	TypeMessage      = "message"
+	TypeSubscribed   = "subscribed"
+	TypeUnsubscribed = "unsubscribed"
+	TypeError        = "error"
+)
+
+type WebsocketConnection interface {
+	SetReadLimit(limit int64)
+	SetReadDeadline(t time.Time) error
+	SetPongHandler(h func(appData string) error)
+	ReadMessage() (messageType int, p []byte, err error)
+	SetWriteDeadline(t time.Time) error
+	WriteMessage(messageType int, data []byte) error
+	Close() error
+}
 
 type ClientProtocolMessage struct {
 	Action  string `json:"action"`
@@ -31,9 +55,25 @@ type ServerProtocolMessage struct {
 
 type Client struct {
 	hub    *Hub
-	conn   *websocket.Conn
+	conn   WebsocketConnection
 	send   chan []byte
 	UserID string
+}
+
+func (c *Client) sendErrorMessage(errMsg string) {
+	msg, err := json.Marshal(ServerProtocolMessage{
+		Type:  TypeError,
+		Error: errMsg,
+	})
+	if err != nil {
+		c.hub.log.Error("failed to marshal error message", zap.Error(err))
+		return
+	}
+	select {
+	case c.send <- msg:
+	default:
+		c.hub.log.Warn("client send buffer full, could not send error message", zap.String("user_id", c.UserID))
+	}
 }
 
 func (c *Client) readPump() {
@@ -55,13 +95,23 @@ func (c *Client) readPump() {
 		var msg ClientProtocolMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
 			c.hub.log.Warn("could not decode client message", zap.Error(err))
+			c.sendErrorMessage("invalid JSON message")
 			continue
 		}
+
+		if msg.Channel == "" {
+			c.sendErrorMessage("channel must be specified")
+			continue
+		}
+
 		switch msg.Action {
-		case "subscribe":
+		case ActionSubscribe:
 			c.hub.subscribe <- subscription{client: c, channel: msg.Channel}
-		case "unsubscribe":
+		case ActionUnsubscribe:
 			c.hub.unsubscribe <- subscription{client: c, channel: msg.Channel}
+		default:
+			c.hub.log.Warn("unknown client action", zap.String("action", msg.Action))
+			c.sendErrorMessage(fmt.Sprintf("unknown action: %s", msg.Action))
 		}
 	}
 }
@@ -112,8 +162,14 @@ func NewMemoryBroker() *MemoryBroker {
 }
 
 func (b *MemoryBroker) Publish(ctx context.Context, channel string, message []byte) error {
-	b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}
-	return nil
+	select {
+	case b.broadcast <- &BrokerMessage{Channel: channel, Payload: message}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errors.New("memory broker channel is full")
+	}
 }
 
 func (b *MemoryBroker) Subscribe(ctx context.Context) (<-chan *BrokerMessage, error) {
@@ -213,16 +269,51 @@ func (h *Hub) Shutdown() {
 }
 
 func (h *Hub) Run() {
-	var brokerCh <-chan *BrokerMessage
-	var err error
-	const maxBackoff = 30 * time.Second
-	nextBackoff := 1 * time.Second
+	go h.runLoop()
+}
+
+func (h *Hub) runLoop() {
+	defer func() {
+		h.log.Info("hub shutdown complete")
+		h.broker.Close()
+		for client := range h.clients {
+			close(client.send)
+		}
+	}()
 
 	for {
 		select {
 		case <-h.ctx.Done():
-			h.log.Info("hub context cancelled, stopping broker subscription attempts")
+			h.log.Info("hub context cancelled, shutting down")
 			return
+		case <-h.shutdown:
+			h.log.Info("hub received shutdown signal, shutting down")
+			return
+		default:
+			err := h.processMessages()
+			if err != nil {
+				if err == context.Canceled || err == context.DeadlineExceeded {
+					return
+				}
+				h.log.Error("hub message processing loop failed, restarting", zap.Error(err))
+				time.Sleep(2 * time.Second)
+			}
+		}
+	}
+}
+
+func (h *Hub) processMessages() error {
+	const maxBackoff = 30 * time.Second
+	nextBackoff := 1 * time.Second
+	var brokerCh <-chan *BrokerMessage
+	var err error
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return h.ctx.Err()
+		case <-h.shutdown:
+			return nil
 		default:
 		}
 
@@ -238,7 +329,9 @@ func (h *Hub) Run() {
 
 		select {
 		case <-h.ctx.Done():
-			return
+			return h.ctx.Err()
+		case <-h.shutdown:
+			return nil
 		case <-time.After(nextBackoff):
 			nextBackoff *= 2
 			if nextBackoff > maxBackoff {
@@ -277,7 +370,7 @@ func (h *Hub) Run() {
 				zap.String("channel", sub.channel),
 			)
 
-			response, _ := json.Marshal(ServerProtocolMessage{Type: "subscribed", Channel: sub.channel})
+			response, _ := json.Marshal(ServerProtocolMessage{Type: TypeSubscribed, Channel: sub.channel})
 			sub.client.send <- response
 
 		case sub := <-h.unsubscribe:
@@ -294,12 +387,16 @@ func (h *Hub) Run() {
 				zap.String("user_id", sub.client.UserID),
 				zap.String("channel", sub.channel),
 			)
-			response, _ := json.Marshal(ServerProtocolMessage{Type: "unsubscribed", Channel: sub.channel})
+			response, _ := json.Marshal(ServerProtocolMessage{Type: TypeUnsubscribed, Channel: sub.channel})
 			sub.client.send <- response
 
-		case msg := <-brokerCh:
+		case msg, ok := <-brokerCh:
+			if !ok {
+				h.log.Warn("broker channel closed, attempting to reconnect")
+				return nil
+			}
 			wrappedMsg, err := json.Marshal(ServerProtocolMessage{
-				Type:    "message",
+				Type:    TypeMessage,
 				Channel: msg.Channel,
 				Payload: msg.Payload,
 			})
@@ -323,21 +420,10 @@ func (h *Hub) Run() {
 			}
 
 		case <-h.shutdown:
-			h.log.Info("hub received shutdown signal, closing client connections")
-			for client := range h.clients {
-				close(client.send)
-			}
-			h.broker.Close()
-			h.log.Info("hub shutdown complete")
-			return
+			return nil
 
 		case <-h.ctx.Done():
-			h.log.Info("hub context cancelled, shutting down")
-			for client := range h.clients {
-				close(client.send)
-			}
-			h.broker.Close()
-			return
+			return h.ctx.Err()
 		}
 	}
 }

@@ -1,8 +1,8 @@
 # cadsock
 
-A high-performance, language-agnostic WebSocket module for the Caddy web server. It provides a real-time messaging hub that can be integrated with any backend application capable of making HTTP requests.
+A high-performance, language-agnostic WebSocket module for the Caddy web server. It provides a resilient, real-time messaging hub that can be integrated with any backend application capable of making HTTP requests.
 
-The module is built in Go and leverages Caddy's powerful, managed lifecycle to offer a scalable and efficient solution for adding real-time features to your web applications.
+The module is built in Go and leverages Caddy's powerful, managed lifecycle to offer a scalable, secure, and efficient solution for adding real-time features to your web applications.
 
 ## Core Concepts
 
@@ -16,7 +16,7 @@ The module operates by exposing two primary endpoints, both managed by the `go_h
 `cadsock` delegates authentication entirely to your existing backend application, acting as a secure gatekeeper. This allows you to reuse your application's session and user validation logic without modification.
 
 1.  A client attempts to open a WebSocket connection to `/ws`.
-2.  The module intercepts this request and makes an internal, server-to-server HTTP `GET` request to the configured `auth_endpoint`. Crucially, **all headers from the original client request are forwarded**, including `Cookie`, `Authorization`, `User-Agent`, etc.
+2.  The module intercepts this request and makes an internal, server-to-server HTTP `GET` request to the configured `auth_endpoint`. For security, only a **safe subset of headers** from the original client request are forwarded, including `Cookie`, `Authorization`, `User-Agent`, and IP-forwarding headers.
 3.  Your backend application at the `auth_endpoint` receives this request. It is responsible for validating the user's credentials using the provided headers (e.g., by decoding a JWT from a bearer token or validating a session cookie).
 4.  If the user is valid, your backend **must** respond with a `200 OK` status and a JSON body containing a unique user identifier, such as `{"id": "user-123"}`.
 5.  Any other response status or a malformed JSON body is treated as an authentication failure. If authentication succeeds, `cadsock` upgrades the client's connection to a WebSocket; otherwise, the connection is rejected with an HTTP error.
@@ -34,12 +34,13 @@ Broadcasting is designed for server-to-server communication and is secured by a 
 
 ## Features
 
--   **Language-Agnostic:** Your backend can be written in PHP, Python, Node.js, Ruby, or any other language capable of handling and making HTTP requests.
--   **Flexible Authentication:** By forwarding all client headers to your backend, the module supports virtually any authentication scheme (JWT Bearer tokens, session cookies, API keys, etc.).
+-   **Language-Agnostic:** Your backend can be written in PHP, Python, Node.js, Ruby, or any other language capable of making HTTP requests.
+-   **Secure Authentication:** Forwards a safe whitelist of headers (`Cookie`, `Authorization`, etc.) to your backend, supporting virtually any authentication scheme without exposing internal server details.
 -   **Secure by Default:** The critical `/internal/broadcast` endpoint is protected by a mandatory shared secret, preventing unauthorized message publishing.
--   **Scalable Architecture:** Start with a simple in-memory broker for single-node deployments and switch to a Redis Pub/Sub broker for horizontal scaling with a single line of configuration.
--   **Robust Lifecycle Management:** Integrates with Caddy's context for graceful shutdowns, ensuring clean closure of client connections and broker resources.
--   **Structured Communication Protocol:** All server-to-client communication uses a clear JSON protocol, providing clients with explicit confirmations for actions and properly encapsulated messages.
+-   **Resilient and Scalable:** Features automatic reconnection to the message broker (e.g., Redis) with exponential backoff. Start with an in-memory broker and scale horizontally to a Redis Pub/Sub cluster with a single line of configuration.
+-   **Unit Tested Core:** The central hub logic is covered by unit tests, ensuring reliability and simplifying maintenance.
+-   **Flexible Origin Control:** Use the `allowed_origins` directive to precisely control which domains can establish WebSocket connections, perfect for securing production and enabling local development.
+-   **Robust Communication Protocol:** All server-to-client communication uses a clear JSON protocol, providing clients with explicit confirmations and detailed error messages for easier debugging.
 
 ## Usage Guide
 
@@ -51,10 +52,6 @@ You must compile a custom Caddy binary that includes this module. The recommende
 # From anywhere
 xcaddy build \
     --with github.com/y-l-g/cadsock
-
-# Or from the project's local directory
-xcaddy build \
-    --with github.com/y-l-g/cadsock=.
 ```
 
 ### 2. Configure Your Caddyfile
@@ -71,11 +68,14 @@ handle @cadsock_paths {
         broadcast_secret "your-very-strong-and-secret-key"
 
         # The internal URL for the authentication webhook.
-        # All headers from the client will be forwarded here.
         auth_endpoint http://localhost:8080/auth.php
 
+        # (Optional) A space-separated list of allowed WebSocket origins.
+        # Defaults to same-origin if not set.
+        allowed_origins http://localhost:8080 http://localhost:3000
+
         # (Optional) The broadcast backend driver ("memory" or "redis").
-        driver memory
+        # driver redis
 
         # (Optional) The address of the Redis server if driver is "redis".
         # redis_address localhost:6379
@@ -85,12 +85,13 @@ handle @cadsock_paths {
 
 #### Configuration Directives
 
-| Directive          | Description                                                              | Default Value                    |
-| ------------------ | ------------------------------------------------------------------------ | -------------------------------- |
-| `broadcast_secret` | **(Required)** The shared secret sent in the `X-Broadcast-Secret` header. | (none)                           |
-| `auth_endpoint`    | The internal URL for the authentication webhook.                         | `http://localhost:8080/auth.php` |
-| `driver`           | The broadcast backend (`memory` or `redis`).                             | `memory`                         |
-| `redis_address`    | The address of the Redis server.                                         | `localhost:6379`                 |
+| Directive | Description | Default Value |
+| :--- | :--- | :--- |
+| `broadcast_secret` | **(Required)** The shared secret sent in the `X-Broadcast-Secret` header. | (none) |
+| `auth_endpoint` | The internal URL for the authentication webhook. | `http://localhost:8080/auth.php` |
+| `allowed_origins` | A space-separated list of allowed WebSocket origins. | (Same-origin policy) |
+| `driver` | The broadcast backend (`memory` or `redis`). | `memory` |
+| `redis_address` | The address of the Redis server. | `localhost:6379` |
 
 ### 3. Implement Backend Endpoints
 
@@ -117,8 +118,7 @@ Clients send JSON messages to the `/ws` endpoint to manage subscriptions.
 -   **Subscribe:**
     ```json
     { "action": "subscribe", "channel": "channel_name" }
-    ```
--   **Unsubscribe:**
+    ```-   **Unsubscribe:**
     ```json
     { "action": "unsubscribe", "channel": "channel_name" }
     ```
@@ -139,7 +139,7 @@ The server sends structured JSON messages to clients to confirm actions or deliv
       "payload": "your-json-encoded-message"
     }
     ```
--   **Error Message:** (Future implementation)
+-   **Error Message:** Sent when the client sends a malformed or invalid request.
     ```json
     { "type": "error", "error": "a description of the error" }
     ```
@@ -150,9 +150,11 @@ A complete example of a backend application using **FrankenPHP** is provided in 
 
 The example has been updated to follow best practices:
 -   It reads secrets from environment variables rather than hardcoding them.
+-   It uses **cURL** for robust server-to-server broadcast requests.
+-   The frontend includes **automatic reconnection logic** with exponential backoff.
 -   It includes a `send_cli.php` script demonstrating the primary server-to-server broadcast use case.
 
-To run the example, first build the custom Caddy binary. 
+To run the example, first build the custom Caddy binary.
 
 ```console
 CGO_ENABLED=1 \
@@ -160,7 +162,7 @@ XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s' -tags=nobadger,nomysql,nopgx,nowatcher" 
 CGO_CFLAGS=$(php-config --includes) \
 CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
 xcaddy build \
-    --output examples/php-app/frankenphp \
+    --output examples/frankenphp-app/frankenphp \
     --with github.com/y-l-g/cadsock=. \
     --with github.com/dunglas/frankenphp/caddy \
     --with github.com/dunglas/caddy-cbrotli
@@ -169,14 +171,15 @@ xcaddy build \
 Then, from the project root:
 
 ```console
+cd examples/frankenphp-app
 JWT_SECRET_KEY='your-super-secret-key' \
 BROADCAST_SECRET_KEY='your-very-strong-and-secret-key' \
-./examples/frankenphp-app/frankenphp run --config examples/frankenphp-app/Caddyfile
+./frankenphp run
 ```
 Then visit localhost:8080 and localhost:8080/send.php
 
 ## Known Limitations & Future Work
 
--   **No Automated Tests:** This is the most significant risk. The module lacks unit and integration tests, making contributions and maintenance difficult. This is the highest priority for moving beyond a PoC status.
--   **No Presence Management:** The module is stateless and does not track which users are in which channels. Building features like "who's online" requires an external state store managed by your application.
--   **Basic Protocol:** The client-server protocol is minimal. It could be extended to include acknowledgements, request IDs, and more detailed error reporting.
+-   **No Presence Management:** The module is stateless and does not track which users are in which channels. Building features like "who's online" requires an external state store managed by your application. This is a deliberate design choice to keep the module simple and scalable.
+-   **Expand Test Coverage:** While the core hub logic is unit-tested, integration tests could be added to further guarantee stability across different versions of Caddy and other dependencies.
+-   **Advanced Protocol Features:** The client-server protocol could be extended to include acknowledgements (QoS), request IDs, or binary message support in the future.

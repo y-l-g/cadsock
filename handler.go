@@ -16,37 +16,23 @@ import (
 	"go.uber.org/zap"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		return u.Host == r.Host
-	},
-}
-
 func init() {
 	caddy.RegisterModule(GoHandler{})
 	httpcaddyfile.RegisterHandlerDirective("go_handler", parseGoHandler)
 }
 
 type GoHandler struct {
-	Driver          string `json:"driver,omitempty"`
-	RedisAddress    string `json:"redis_address,omitempty"`
-	AuthEndpoint    string `json:"auth_endpoint,omitempty"`
-	BroadcastSecret string `json:"broadcast_secret,omitempty"`
+	Driver          string   `json:"driver,omitempty"`
+	RedisAddress    string   `json:"redis_address,omitempty"`
+	AuthEndpoint    string   `json:"auth_endpoint,omitempty"`
+	BroadcastSecret string   `json:"broadcast_secret,omitempty"`
+	AllowedOrigins  []string `json:"allowed_origins,omitempty"`
 	hub             *Hub
 	log             *zap.Logger
 	httpClient      *http.Client
 	ctx             context.Context
 	cancel          context.CancelFunc
+	upgrader        websocket.Upgrader
 }
 
 func (GoHandler) CaddyModule() caddy.ModuleInfo {
@@ -60,6 +46,31 @@ func (h *GoHandler) Provision(ctx caddy.Context) error {
 	h.log = ctx.Logger(h)
 	h.httpClient = &http.Client{}
 	h.ctx, h.cancel = context.WithCancel(ctx)
+
+	h.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			if len(h.AllowedOrigins) == 0 {
+				u, err := url.Parse(origin)
+				if err != nil {
+					return false
+				}
+				return u.Host == r.Host
+			}
+			for _, allowedOrigin := range h.AllowedOrigins {
+				if allowedOrigin == origin {
+					return true
+				}
+			}
+			h.log.Warn("websocket origin not allowed", zap.String("origin", origin))
+			return false
+		},
+	}
 
 	var broker Broker
 	switch h.Driver {
@@ -114,6 +125,11 @@ func (h *GoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				h.BroadcastSecret = d.Val()
+			case "allowed_origins":
+				h.AllowedOrigins = d.RemainingArgs()
+				if len(h.AllowedOrigins) == 0 {
+					return d.ArgErr()
+				}
 			}
 		}
 	}
@@ -131,13 +147,13 @@ func (h *GoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	case "/ws":
 		return h.serveWs(w, r)
 	case "/internal/broadcast":
-		return h.serveBroadcast(w, r, r.Context())
+		return h.serveBroadcast(w, r)
 	default:
 		return next.ServeHTTP(w, r)
 	}
 }
 
-func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request, ctx context.Context) error {
+func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request) error {
 	if h.BroadcastSecret != "" {
 		headerSecret := r.Header.Get("X-Broadcast-Secret")
 		if subtle.ConstantTimeCompare([]byte(h.BroadcastSecret), []byte(headerSecret)) != 1 {
@@ -167,7 +183,7 @@ func (h *GoHandler) serveBroadcast(w http.ResponseWriter, r *http.Request, ctx c
 		return errors.New("hub or broker not initialized")
 	}
 
-	err := h.hub.broker.Publish(ctx, channel, []byte(message))
+	err := h.hub.broker.Publish(r.Context(), channel, []byte(message))
 	if err != nil {
 		h.log.Error("error publishing message", zap.Error(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -185,7 +201,18 @@ func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	authReq.Header = r.Header.Clone()
+	headersToForward := []string{
+		"Authorization",
+		"Cookie",
+		"User-Agent",
+		"X-Forwarded-For",
+		"X-Real-IP",
+	}
+	for _, headerName := range headersToForward {
+		if headerValue := r.Header.Get(headerName); headerValue != "" {
+			authReq.Header.Set(headerName, headerValue)
+		}
+	}
 
 	resp, err := h.httpClient.Do(authReq)
 	if err != nil {
@@ -207,7 +234,7 @@ func (h *GoHandler) serveWs(w http.ResponseWriter, r *http.Request) error {
 		return errors.New("invalid auth response")
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return err
 	}
